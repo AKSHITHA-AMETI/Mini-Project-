@@ -1,11 +1,17 @@
 import cv2
 import time
+import os
+import random
+import requests
+from datetime import datetime, timezone
 from utils.face_detection import detect_faces, annotate_faces
 from utils.gaze_tracking import estimate_gaze
 from utils.head_pose import estimate_head_pose
 from utils.yawn_detection import estimate_yawn
 from utils.laugh_detection import estimate_laugh
 from utils.focus_score import compute_focus_score
+
+API_FRAME_URL = os.getenv("FOCUS_API_URL", "http://127.0.0.1:5000/frame")
 
 
 def run_attention_tracker():
@@ -44,10 +50,34 @@ def run_attention_tracker():
             laughing, width, height = estimate_laugh(frame)
 
             # Focus score is computed internally for logic; not drawn on video now
-            _ = compute_focus_score(gaze, head_direction, yawning, laughing)
+            focus_score = compute_focus_score(gaze, head_direction, yawning, laughing)
 
             # Mark/update face boxes
             annotate_faces(frame, face_detections)
+
+            # Send frame event to backend
+            payload = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "student_id": None,
+                "gaze": gaze,
+                "head_direction": head_direction,
+                "yawning": bool(yawning),
+                "mouth_distance": float(mouth_distance),
+                "laughing": bool(laughing),
+                "mouth_width": float(width),
+                "mouth_height": float(height),
+                "focus_score": float(focus_score),
+            }
+
+            try:
+                resp = requests.post(API_FRAME_URL, json=payload, timeout=2)
+                if not resp.ok:
+                    print("Warning: /frame API returned", resp.status_code, resp.text)
+            except requests.RequestException as e:
+                print("Warning: /frame API request failed:", e)
+
+            # Randomize next interval early to avoid fixed schedule
+            process_interval = random.uniform(8.0, 10.0)
 
         # Always render overlays for latest values.
         cv2.putText(frame, f"Gaze: {gaze}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)

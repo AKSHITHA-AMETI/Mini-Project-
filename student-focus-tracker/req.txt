@@ -3,3 +3,5 @@ mediapipe
 numpy
 streamlit
 flask
+pandas
+requests
