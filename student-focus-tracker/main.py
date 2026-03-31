@@ -12,12 +12,10 @@ from utils.laugh_detection import estimate_laugh
 from utils.focus_score import compute_focus_score
 
 API_FRAME_URL = os.getenv("FOCUS_API_URL", "http://127.0.0.1:5000/frame")
-
-
 def run_attention_tracker():
     cap = cv2.VideoCapture(0)
     last_processed = 0.0
-    process_interval = 5.0
+    process_interval = random.uniform(8.0, 10.0)
 
     if not cap.isOpened():
         print("Error: Webcam not found.")
@@ -28,10 +26,10 @@ def run_attention_tracker():
     gaze = "Unknown"
     head_direction = "Unknown"
     yawning = False
-    mouth_distance = 0.0
+    yawn_mar = 0.0
     laughing = False
-    width = 0.0
-    height = 0.0
+    laugh_mar = 0.0
+    laugh_width_ratio = 0.0
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -46,8 +44,8 @@ def run_attention_tracker():
             face_detections = detect_faces(frame)
             gaze = estimate_gaze(frame)
             head_direction = estimate_head_pose(frame)
-            yawning, mouth_distance = estimate_yawn(frame)
-            laughing, width, height = estimate_laugh(frame)
+            yawning, yawn_mar = estimate_yawn(frame)
+            laughing, laugh_mar, laugh_width_ratio = estimate_laugh(frame)
 
             # Focus score is computed internally for logic; not drawn on video now
             focus_score = compute_focus_score(gaze, head_direction, yawning, laughing)
@@ -62,10 +60,10 @@ def run_attention_tracker():
                 "gaze": gaze,
                 "head_direction": head_direction,
                 "yawning": bool(yawning),
-                "mouth_distance": float(mouth_distance),
+                "yawn_mar": float(yawn_mar),
                 "laughing": bool(laughing),
-                "mouth_width": float(width),
-                "mouth_height": float(height),
+                "laugh_mar": float(laugh_mar),
+                "laugh_width_ratio": float(laugh_width_ratio),
                 "focus_score": float(focus_score),
             }
 

@@ -62,14 +62,8 @@ def main():
     else:
         st.subheader("Focus Score Time Series")
         st.line_chart(history.set_index("timestamp")["focus_score"])
-
-        st.subheader("Event counts")
-        if "yawning" in history.columns and "laughing" in history.columns:
-            st.bar_chart(history[["yawning", "laughing"]].sum())
-
         st.subheader("Raw Table")
         st.dataframe(history[["timestamp", "gaze", "head_direction", "yawning", "laughing", "focus_score"]].sort_values("timestamp", ascending=False))
-
     if st.button("Refresh now"):
         st.cache_data.clear()
         st.rerun()
