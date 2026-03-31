@@ -8,7 +8,7 @@ try:
 except:
     API_BASE = os.getenv("FOCUS_API_URL", "http://127.0.0.1:5000")
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=8)
 def fetch_history(limit=240):
     try:
         resp = requests.get(f"{API_BASE}/history", params={"limit": limit}, timeout=3)
@@ -49,15 +49,13 @@ def main():
     stats = fetch_stats()
     history = fetch_history(history_limit)
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     col1.metric("Total Records", stats.get("count", 0))
     col2.metric("Average Focus", f"{stats.get('average_score', 0.0):.1f}%")
     if stats.get("latest"):
         col3.metric("Latest Score", f"{stats['latest'].get('focus_score', 0.0):.1f}%")
-        col4.metric("Latest Gaze", stats['latest'].get("gaze", "N/A"))
     else:
         col3.metric("Latest Score", "N/A")
-        col4.metric("Latest Gaze", "N/A")
 
     if history.empty:
         st.warning("No history data available yet. Start backend + main app to begin collecting data.")
@@ -75,9 +73,6 @@ def main():
     if st.button("Refresh now"):
         st.cache_data.clear()
         st.rerun()
-
-    st.info("Dashboard auto-refreshes every 10 seconds (reload to update cache)")
-
-
+    st.info("Dashboard auto-refreshes every 10 seconds")
 if __name__ == "__main__":
     main()
