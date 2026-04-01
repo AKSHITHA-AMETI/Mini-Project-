@@ -35,7 +35,25 @@ def fetch_stats():
         st.error(f"Error fetching stats: {e}")
     return {}
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=5)
+def fetch_class_status():
+    try:
+        resp = requests.get(f"{API_BASE}/class_status", timeout=3)
+        if resp.ok:
+            return resp.json().get("status", "inactive")
+    except Exception as e:
+        st.error(f"Error fetching class status: {e}")
+    return "inactive"
+
+def set_class_status(status):
+    try:
+        resp = requests.post(f"{API_BASE}/class_status", json={"status": status}, timeout=3)
+        return resp.ok
+    except Exception as e:
+        st.error(f"Error setting class status: {e}")
+        return False
+
+@st.cache_data(ttl=5)
 def fetch_meeting_url():
     try:
         resp = requests.get(f"{API_BASE}/meeting", timeout=3)
@@ -75,10 +93,16 @@ def student_page():
     st.subheader("Join Class Meeting")
 
     meeting_url = fetch_meeting_url()
+    class_status = fetch_class_status()
 
     if meeting_url:
         st.write(f"**Class Meeting URL:** {meeting_url}")
         st.info("You must join through this official class URL provided by your teacher.")
+
+        if class_status != "active":
+            st.warning("Class is not active. Tracking will start once the teacher starts the class.")
+            st.button("Join Meeting & Start Tracking", disabled=True)
+            st.stop()
 
         if st.button("Join Meeting & Start Tracking"):
             st.success(f"Opening meeting: {meeting_url}")
@@ -91,7 +115,6 @@ def student_page():
             st.subheader("Focus Tracking Active")
             st.write(f"Meeting: {meeting_url}")
 
-            # Show current stats
             stats = fetch_stats()
             if stats.get("latest"):
                 col1, col2 = st.columns(2)
@@ -113,6 +136,27 @@ def teacher_page():
 
     st.sidebar.header("Settings")
     history_limit = st.sidebar.number_input("History points", min_value=20, max_value=1000, value=240, step=20)
+
+    # Class status control
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Class Control")
+    current_status = fetch_class_status()
+    st.sidebar.write(f"**Current Status:** {current_status.upper()}")
+
+    col1, col2 = st.sidebar.columns(2)
+    if col1.button("Start Class", disabled=current_status == "active"):
+        if set_class_status("active"):
+            st.sidebar.success("Class started! Students can now track focus.")
+            st.cache_data.clear()
+        else:
+            st.sidebar.error("Failed to start class")
+
+    if col2.button("Stop Class", disabled=current_status == "inactive"):
+        if set_class_status("inactive"):
+            st.sidebar.success("Class stopped. Students cannot track focus.")
+            st.cache_data.clear()
+        else:
+            st.sidebar.error("Failed to stop class")
 
     # Meeting URL setup
     st.sidebar.markdown("---")
