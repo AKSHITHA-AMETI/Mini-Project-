@@ -45,8 +45,11 @@ def init_db():
             mouth_width REAL,
             mouth_height REAL,
             focus_score REAL
+        );        CREATE TABLE IF NOT EXISTS meeting (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            url TEXT
         );
-        """
+        INSERT OR IGNORE INTO meeting (id, url) VALUES (1, '');        """
     )
     db.commit()
 
@@ -90,21 +93,38 @@ def get_history():
     return jsonify({"history": history})
 
 
+@app.route("/meeting", methods=["GET"])
+def get_meeting():
+    db = get_db()
+    row = db.execute("SELECT url FROM meeting WHERE id = 1").fetchone()
+    return jsonify({"url": row["url"] if row else ""})
+
+
+@app.route("/meeting", methods=["POST"])
+def set_meeting():
+    data = request.get_json(force=True, silent=True)
+    if not data or "url" not in data:
+        return jsonify({"error": "url required"}), 400
+    url = data["url"]
+    db = get_db()
+    db.execute("UPDATE meeting SET url = ? WHERE id = 1", (url,))
+    db.commit()
+    return jsonify({"status": "ok"}), 200
+
+
 @app.route("/stats", methods=["GET"])
 def get_stats():
     db = get_db()
-    latest = db.execute("SELECT * FROM frames ORDER BY id DESC LIMIT 1").fetchone()
-    if latest is None:
-        return jsonify({"message": "no data"}), 404
-    count = db.execute("SELECT COUNT(*) as cnt FROM frames").fetchone()["cnt"]
-    avg = db.execute("SELECT AVG(focus_score) as avg_score FROM frames").fetchone()["avg_score"]
-    return jsonify(
-        {
-            "count": count,
-            "average_score": float(avg) if avg is not None else 0.0,
-            "latest": dict(latest),
-        }
-    )
+    cursor = db.execute("SELECT COUNT(*) as count, AVG(focus_score) as average_score FROM frames")
+    row = cursor.fetchone()
+    count = row["count"] if row else 0
+    average_score = row["average_score"] if row and row["average_score"] else 0.0
+
+    cursor = db.execute("SELECT * FROM frames ORDER BY id DESC LIMIT 1")
+    latest = cursor.fetchone()
+    latest_data = dict(latest) if latest else None
+
+    return jsonify({"count": count, "average_score": average_score, "latest": latest_data})
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ def estimate_head_pose(frame, min_detection_confidence=0.5, min_tracking_confide
         results = face_mesh.process(rgb)
 
     if not results.multi_face_landmarks:
-        return "Unknown"
+        return "No Face detected"
 
     face_landmarks = results.multi_face_landmarks[0]
     h, w, _ = frame.shape
@@ -40,7 +40,7 @@ def estimate_head_pose(frame, min_detection_confidence=0.5, min_tracking_confide
 
     success, rot_vec, trans_vec = cv2.solvePnP(face_3d, face_2d, cam_matrix, dist_matrix)
     if not success:
-        return "Unknown"
+        return "No Face detected"
 
     rmat, _ = cv2.Rodrigues(rot_vec)
     angles, _, _, _, _, _ = cv2.RQDecomp3x3(rmat)
