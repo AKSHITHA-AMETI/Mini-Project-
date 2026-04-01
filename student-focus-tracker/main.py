@@ -26,10 +26,10 @@ def run_attention_tracker():
     gaze = "Unknown"
     head_direction = "Unknown"
     yawning = False
-    yawn_mar = 0.0
+    mouth_distance = 0.0
     laughing = False
-    laugh_mar = 0.0
-    laugh_width_ratio = 0.0
+    width = 0.0
+    height = 0.0
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -44,8 +44,8 @@ def run_attention_tracker():
             face_detections = detect_faces(frame)
             gaze = estimate_gaze(frame)
             head_direction = estimate_head_pose(frame)
-            yawning, yawn_mar = estimate_yawn(frame)
-            laughing, laugh_mar, laugh_width_ratio = estimate_laugh(frame)
+            yawning, mouth_distance = estimate_yawn(frame)
+            laughing, width, height = estimate_laugh(frame)
 
             # Focus score is computed internally for logic; not drawn on video now
             focus_score = compute_focus_score(gaze, head_direction, yawning, laughing)
@@ -60,10 +60,10 @@ def run_attention_tracker():
                 "gaze": gaze,
                 "head_direction": head_direction,
                 "yawning": bool(yawning),
-                "yawn_mar": float(yawn_mar),
+                "mouth_distance": float(mouth_distance),
                 "laughing": bool(laughing),
-                "laugh_mar": float(laugh_mar),
-                "laugh_width_ratio": float(laugh_width_ratio),
+                "mouth_width": float(width),
+                "mouth_height": float(height),
                 "focus_score": float(focus_score),
             }
 
