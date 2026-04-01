@@ -12,6 +12,21 @@ from utils.laugh_detection import estimate_laugh
 from utils.focus_score import compute_focus_score
 
 API_FRAME_URL = os.getenv("FOCUS_API_URL", "http://127.0.0.1:5000/frame")
+API_STATUS_URL = os.getenv("FOCUS_API_URL", "http://127.0.0.1:5000/class_status")
+
+def check_class_status():
+    """Check if class is active before sending tracking data."""
+    try:
+        resp = requests.get(API_STATUS_URL, timeout=2)
+        if resp.ok:
+            data = resp.json()
+            return data.get("status", "inactive") == "active"
+        else:
+            print("Warning: Could not check class status, assuming inactive")
+            return False
+    except requests.RequestException as e:
+        print("Warning: Class status check failed, assuming inactive:", e)
+        return False
 def run_attention_tracker():
     cap = cv2.VideoCapture(0)
     last_processed = 0.0
@@ -53,26 +68,30 @@ def run_attention_tracker():
             # Mark/update face boxes
             annotate_faces(frame, face_detections)
 
-            # Send frame event to backend
-            payload = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "student_id": None,
-                "gaze": gaze,
-                "head_direction": head_direction,
-                "yawning": bool(yawning),
-                "mouth_distance": float(mouth_distance),
-                "laughing": bool(laughing),
-                "mouth_width": float(width),
-                "mouth_height": float(height),
-                "focus_score": float(focus_score),
-            }
+            # Check class status before sending data
+            if check_class_status():
+                # Send frame event to backend
+                payload = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "student_id": None,
+                    "gaze": gaze,
+                    "head_direction": head_direction,
+                    "yawning": bool(yawning),
+                    "mouth_distance": float(mouth_distance),
+                    "laughing": bool(laughing),
+                    "mouth_width": float(width),
+                    "mouth_height": float(height),
+                    "focus_score": float(focus_score),
+                }
 
-            try:
-                resp = requests.post(API_FRAME_URL, json=payload, timeout=2)
-                if not resp.ok:
-                    print("Warning: /frame API returned", resp.status_code, resp.text)
-            except requests.RequestException as e:
-                print("Warning: /frame API request failed:", e)
+                try:
+                    resp = requests.post(API_FRAME_URL, json=payload, timeout=2)
+                    if not resp.ok:
+                        print("Warning: /frame API returned", resp.status_code, resp.text)
+                except requests.RequestException as e:
+                    print("Warning: /frame API request failed:", e)
+            else:
+                print("Class not active - skipping data transmission")
 
             # Randomize next interval early to avoid fixed schedule
             process_interval = random.uniform(8.0, 10.0)

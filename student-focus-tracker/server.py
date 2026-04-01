@@ -45,11 +45,18 @@ def init_db():
             mouth_width REAL,
             mouth_height REAL,
             focus_score REAL
-        );        CREATE TABLE IF NOT EXISTS meeting (
+        );
+        CREATE TABLE IF NOT EXISTS meeting (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             url TEXT
         );
-        INSERT OR IGNORE INTO meeting (id, url) VALUES (1, '');        """
+        INSERT OR IGNORE INTO meeting (id, url) VALUES (1, '');
+        CREATE TABLE IF NOT EXISTS class_status (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            status TEXT DEFAULT 'inactive'
+        );
+        INSERT OR IGNORE INTO class_status (id, status) VALUES (1, 'inactive');
+        """
     )
     db.commit()
 
@@ -108,6 +115,27 @@ def set_meeting():
     url = data["url"]
     db = get_db()
     db.execute("UPDATE meeting SET url = ? WHERE id = 1", (url,))
+    db.commit()
+    return jsonify({"status": "ok"}), 200
+
+
+@app.route("/class_status", methods=["GET"])
+def get_class_status():
+    db = get_db()
+    row = db.execute("SELECT status FROM class_status WHERE id = 1").fetchone()
+    return jsonify({"status": row["status"] if row else "inactive"})
+
+
+@app.route("/class_status", methods=["POST"])
+def set_class_status():
+    data = request.get_json(force=True, silent=True)
+    if not data or "status" not in data:
+        return jsonify({"error": "status required"}), 400
+    status = data["status"]
+    if status not in ["active", "inactive"]:
+        return jsonify({"error": "status must be 'active' or 'inactive'"}), 400
+    db = get_db()
+    db.execute("UPDATE class_status SET status = ? WHERE id = 1", (status,))
     db.commit()
     return jsonify({"status": "ok"}), 200
 
