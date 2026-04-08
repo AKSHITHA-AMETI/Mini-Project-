@@ -4,49 +4,75 @@ A web-based application for tracking student attention during online meetings us
 
 ## Features
 
-- **Role-based Login**: Separate interfaces for students and teachers
-- **Meeting Integration**: Students can join Zoom/Meet/Google Meet meetings directly from the app
-- **Real-time Focus Tracking**: Webcam-based attention monitoring
+- **Role-based Login**: Separate interfaces for students, teachers, and admins
+- **Student ID Tracking**: Each student tracked by unique ID
+- **Meeting Integration**: Students can join Google Meet meetings, participants tracked
+- **Real-time Focus Tracking**: Webcam-based attention monitoring (students only)
+- **Face Detection Alerts**: Alerts sent to student and admin if face not detected
 - **Teacher Dashboard**: Monitor student focus scores and trends
-- **Data Persistence**: SQLite database for storing attention data
+- **Admin Access**: View all classes and participants
+- **Multi-device Support**: Students can join from different devices
+- **Data Persistence**: MongoDB database for storing attention data
+- **Deployment Ready**: Docker support for easy deployment
 
 ## Setup
 
-1. Install dependencies:
+1. Install MongoDB locally or use Docker.
+
+2. Install dependencies:
 ```bash
 pip install -r req.txt
 ```
 
-2. Start the backend API server:
+3. Set environment variables:
+   - JWT_SECRET_KEY
+   - MAIL_USERNAME (Gmail)
+   - MAIL_PASSWORD (Gmail app password)
+   - ADMIN_PASSWORD (for admin login)
+
+4. Start the backend API server:
 ```bash
 python server.py
 ```
 
-3. Start the webcam tracker (in another terminal):
+5. For deployment with Docker:
 ```bash
-python main.py
+docker-compose up --build
 ```
 
-4. Launch the web interface:
-```bash
-streamlit run dashboard/app.py
-```
+## API Endpoints
 
-## Usage
-
-### For Students:
-1. Select "Student" role and login
-2. Enter your meeting URL (Zoom, Google Meet, etc.)
-3. Click "Join Meeting & Start Tracking"
-4. The meeting will open in your browser and focus tracking will begin
+- POST /register: Register user
+- POST /login: Student/Teacher login
+- POST /admin_login: Admin login
+- POST /classes: Create class
+- GET /classes: Get classes (optional ?status=active/upcoming/completed)
+- POST /classes/<class_id>/status: Set class status
+- POST /frame: Send frame data (students)
+- GET /history/<class_id>: Get frame history (optional ?student_email=...&limit=...)
+- GET /stats/<class_id>: Get stats (optional ?student_email=...)
+- GET /meeting_participants/<class_id>: Get all joined students
+- GET /students: Get all students (for teacher selection)
 
 ### For Teachers:
-1. Select "Teacher" role and login
-2. View real-time student focus metrics
-3. Monitor attention trends over time
-4. Access historical data
+1. Register/Login with email/password
+2. Create classes with meeting URLs
+3. View student focus data
 
-## Architecture
+### For Admins:
+1. Login with admin email and fixed password
+2. Access all data
+
+## API Endpoints
+
+- POST /register: Register user
+- POST /login: Student/Teacher login
+- POST /admin_login: Admin login
+- POST /classes: Create class
+- GET /classes: Get classes
+- POST /frame: Send frame data (students)
+- GET /meeting_participants/<class_id>: Get all joined students
+- And more...
 
 - **Frontend**: Streamlit web interface
 - **Backend**: Flask REST API
