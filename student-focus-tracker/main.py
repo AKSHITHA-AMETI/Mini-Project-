@@ -12,6 +12,7 @@ from utils.laugh_detection import estimate_laugh
 from utils.focus_score import compute_focus_score
 
 API_FRAME_URL = os.getenv("FOCUS_API_URL", "http://127.0.0.1:5000/frame")
+<<<<<<< Updated upstream
 API_STATUS_URL = os.getenv("FOCUS_API_URL", "http://127.0.0.1:5000/class_status")
 
 def check_class_status():
@@ -28,6 +29,11 @@ def check_class_status():
         print("Warning: Class status check failed, assuming inactive:", e)
         return False
 def run_attention_tracker():
+=======
+
+
+def run_attention_tracker(student_id=None, class_id=None):
+>>>>>>> Stashed changes
     cap = cv2.VideoCapture(0)
     last_processed = 0.0
     process_interval = random.uniform(8.0, 10.0)
@@ -36,7 +42,11 @@ def run_attention_tracker():
         print("Error: Webcam not found.")
         return
 
-    print("Starting Student Focus Tracker. Press 'q' to stop.")
+    print(f"Starting Student Focus Tracker. Press 'q' to stop.")
+    if class_id:
+        print(f"Tracking for Class ID: {class_id}")
+    if student_id:
+        print(f"Student ID: {student_id}")
 
     gaze = "Unknown"
     head_direction = "Unknown"
@@ -68,6 +78,7 @@ def run_attention_tracker():
             # Mark/update face boxes
             annotate_faces(frame, face_detections)
 
+<<<<<<< Updated upstream
             # Check class status before sending data
             if check_class_status():
                 # Send frame event to backend
@@ -83,6 +94,22 @@ def run_attention_tracker():
                     "mouth_height": float(height),
                     "focus_score": float(focus_score),
                 }
+=======
+            # Send frame event to backend
+            payload = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "student_id": student_id,
+                "class_id": class_id,
+                "gaze": gaze,
+                "head_direction": head_direction,
+                "yawning": bool(yawning),
+                "mouth_distance": float(mouth_distance),
+                "laughing": bool(laughing),
+                "mouth_width": float(width),
+                "mouth_height": float(height),
+                "focus_score": float(focus_score),
+            }
+>>>>>>> Stashed changes
 
                 try:
                     resp = requests.post(API_FRAME_URL, json=payload, timeout=2)
@@ -112,4 +139,15 @@ def run_attention_tracker():
 
 
 if __name__ == "__main__":
-    run_attention_tracker()
+    import sys
+    
+    student_id = None
+    class_id = None
+    
+    # Parse command line arguments
+    if len(sys.argv) > 1:
+        student_id = sys.argv[1]
+    if len(sys.argv) > 2:
+        class_id = int(sys.argv[2])
+    
+    run_attention_tracker(student_id=student_id, class_id=class_id)

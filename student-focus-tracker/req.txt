@@ -1,7 +1,9 @@
-opencv-python
-mediapipe
-numpy
+opencv-python<4.13
+mediapipe==0.10.14
+numpy<2
 streamlit
 flask
 pandas
 requests
+tensorflow==2.13.0
+typing-extensions>=4.12.0
