@@ -18,9 +18,11 @@ def api_request(method, endpoint, data=None, headers=None):
         headers['Authorization'] = st.session_state['token']
     try:
         if method == 'GET':
-            resp = requests.get(url, headers=headers, timeout=3)
+            resp = requests.get(url, headers=headers, params=data, timeout=3)
         elif method == 'POST':
             resp = requests.post(url, json=data, headers=headers, timeout=3)
+        else:
+            raise ValueError(f"Unsupported method: {method}")
         if resp.ok:
             return resp.json()
         else:
@@ -50,6 +52,13 @@ def fetch_stats(class_id):
 def fetch_active_students(class_id):
     data = api_request('GET', f'/active_students/{class_id}')
     return data or {'active_students': 0}
+
+@st.cache_data(ttl=30)
+def fetch_students():
+    data = api_request('GET', '/students')
+    if data and 'students' in data:
+        return data['students']
+    return []
 
 def login_page():
     st.title("Student Focus Tracker - Login")
@@ -147,47 +156,15 @@ def teacher_page():
     user = st.session_state['user']
     st.subheader(f"Welcome, {user['name']}")
 
-    tab1, tab2, tab3 = st.tabs(["Active Classes", "Create Class", "Completed Classes"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Active Classes", "Upcoming Classes", "Create Class", "Completed Classes"])
 
-    with tab2:
-        with st.form("create_class"):
-            class_name = st.text_input("Class Name")
-            student_emails = st.text_area("Student Emails (comma separated)")
-            meeting_url = st.text_input("Meeting URL", placeholder="https://meet.google.com/abc-defg-hij")
-            col1, col2 = st.columns(2)
-            with col1:
-                start_date = st.date_input("Start Date")
-                start_time = st.time_input("Start Time")
-            with col2:
-                end_date = st.date_input("End Date")
-                end_time = st.time_input("End Time")
-            submitted = st.form_submit_button("Create Class")
-            if submitted:
-                from datetime import datetime
-                start_datetime = datetime.combine(start_date, start_time)
-                end_datetime = datetime.combine(end_date, end_time)
-                start_time_str = start_datetime.isoformat()
-                end_time_str = end_datetime.isoformat()
-                emails = [e.strip() for e in student_emails.split(',')]
-                data = {
-                    'class_name': class_name,
-                    'student_emails': emails,
-                    'meeting_url': meeting_url,
-                    'start_time': start_time_str,
-                    'end_time': end_time_str
-                }
-                resp = api_request('POST', '/classes', data)
-                if resp and 'message' in resp:
-                    st.success("Class created!")
-                    st.cache_data.clear()
-                else:
-                    st.error("Failed to create class")
+    classes_active = api_request('GET', '/classes', {'status': 'active'}) or []
+    classes_upcoming = api_request('GET', '/classes', {'status': 'upcoming'}) or []
+    classes_completed = api_request('GET', '/classes', {'status': 'completed'}) or []
 
     with tab1:
-        classes = api_request('GET', '/classes')
-        active_classes = [cls for cls in classes if cls.get('status') == 'active'] if classes else []
-        if active_classes:
-            for cls in active_classes:
+        if classes_active:
+            for cls in classes_active:
                 with st.expander(f"{cls['class_name']} - ACTIVE"):
                     start_dt = pd.to_datetime(cls['start_time']).strftime("%Y-%m-%d %H:%M")
                     end_dt = pd.to_datetime(cls['end_time']).strftime("%Y-%m-%d %H:%M")
@@ -207,7 +184,6 @@ def teacher_page():
                         st.cache_data.clear()
                         st.rerun()
 
-                    # Class stats
                     stats = fetch_stats(cls['_id'])
                     active = fetch_active_students(cls['_id'])
                     st.metric("Active Students", active['active_students'])
@@ -216,7 +192,6 @@ def teacher_page():
                     history = fetch_history(cls['_id'])
                     if not history.empty:
                         st.line_chart(history.set_index("timestamp")["focus_score"])
-
                         st.subheader("Individual Student Dashboards")
                         for email in cls['student_emails']:
                             student_data = history[history['student_email'] == email]
@@ -224,29 +199,88 @@ def teacher_page():
                                 avg_focus = student_data['focus_score'].mean()
                                 st.write(f"**{email}**: Average Focus {avg_focus:.1f}%")
                                 st.line_chart(student_data.set_index("timestamp")["focus_score"])
+        else:
+            st.info("No active classes.")
+
+    with tab2:
+        if classes_upcoming:
+            for cls in classes_upcoming:
+                with st.expander(f"{cls['class_name']} - UPCOMING"):
+                    start_dt = pd.to_datetime(cls['start_time']).strftime("%Y-%m-%d %H:%M")
+                    end_dt = pd.to_datetime(cls['end_time']).strftime("%Y-%m-%d %H:%M")
+                    st.write(f"Start: {start_dt}, End: {end_dt}")
+                    st.write(f"Meeting URL: {cls.get('meeting_url', 'Not set')}")
+                    st.write(f"Students: {', '.join(cls['student_emails'])}")
+                    if st.button(f"Refresh", key=f"refresh_upcoming_{cls['_id']}"):
+                        st.cache_data.clear()
+                        st.rerun()
+        else:
+            st.info("No upcoming classes.")
 
     with tab3:
-        completed_classes = [cls for cls in classes if cls.get('status') == 'completed'] if classes else []
-        if completed_classes:
-            for cls in completed_classes:
+        students = fetch_students()
+        if students:
+            student_options = [f"{student['name']} <{student['email']}>" for student in students]
+
+            with st.form("create_class"):
+                class_name = st.text_input("Class Name")
+                selected_students = st.multiselect("Select Students", student_options)
+                meeting_url = st.text_input("Meeting URL", placeholder="https://meet.google.com/abc-defg-hij")
+                col1, col2 = st.columns(2)
+                with col1:
+                    start_date = st.date_input("Start Date")
+                    start_time = st.time_input("Start Time")
+                with col2:
+                    end_date = st.date_input("End Date")
+                    end_time = st.time_input("End Time")
+                submitted = st.form_submit_button("Create Class")
+                if submitted:
+                    if not class_name:
+                        st.error("Class name is required")
+                    elif not selected_students:
+                        st.error("Select at least one student")
+                    elif not meeting_url:
+                        st.error("Meeting URL is required")
+                    else:
+                        start_datetime = datetime.combine(start_date, start_time)
+                        end_datetime = datetime.combine(end_date, end_time)
+                        start_time_str = start_datetime.isoformat()
+                        end_time_str = end_datetime.isoformat()
+                        emails = [option.split('<')[-1].replace('>', '').strip() for option in selected_students]
+                        data = {
+                            'class_name': class_name,
+                            'student_emails': emails,
+                            'meeting_url': meeting_url,
+                            'start_time': start_time_str,
+                            'end_time': end_time_str
+                        }
+                        resp = api_request('POST', '/classes', data)
+                        if resp and 'message' in resp:
+                            st.success("Class created!")
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error("Failed to create class")
+        else:
+            st.warning("No students found. Please register students first.")
+
+    with tab4:
+        if classes_completed:
+            for cls in classes_completed:
                 with st.expander(f"{cls['class_name']} - COMPLETED"):
                     start_dt = pd.to_datetime(cls['start_time']).strftime("%Y-%m-%d %H:%M")
                     end_dt = pd.to_datetime(cls['end_time']).strftime("%Y-%m-%d %H:%M")
                     st.write(f"Start: {start_dt}, End: {end_dt}")
                     st.write(f"Meeting URL: {cls.get('meeting_url', 'Not set')}")
                     st.write(f"Students: {', '.join(cls['student_emails'])}")
-
-                    # Final stats
                     stats = fetch_stats(cls['_id'])
                     st.metric("Total Records", stats.get('count', 0))
                     st.metric("Final Average Focus", f"{stats.get('average_score', 0.0):.1f}%")
-
                     history = fetch_history(cls['_id'])
                     if not history.empty:
                         st.line_chart(history.set_index("timestamp")["focus_score"])
                         st.subheader("Full History")
                         st.dataframe(history)
-
                         st.subheader("Individual Student Dashboards")
                         for email in cls['student_emails']:
                             student_data = history[history['student_email'] == email]
