@@ -12,10 +12,15 @@ from utils.laugh_detection import estimate_laugh
 from utils.focus_score import compute_focus_score
 
 API_FRAME_URL = os.getenv("FOCUS_API_URL", "http://127.0.0.1:5000/frame")
-API_STATUS_URL = os.getenv("FOCUS_API_URL", "http://127.0.0.1:5000/class_status")
+STUDENT_EMAIL = os.getenv("STUDENT_EMAIL")
+CLASS_ID = os.getenv("CLASS_ID")
+API_STATUS_URL = os.getenv("FOCUS_API_URL", f"http://127.0.0.1:5000/classes/{CLASS_ID}/status") if CLASS_ID else None
 
 def check_class_status():
     """Check if class is active before sending tracking data."""
+    if not API_STATUS_URL:
+        print("Warning: CLASS_ID not set, assuming inactive")
+        return False
     try:
         resp = requests.get(API_STATUS_URL, timeout=2)
         if resp.ok:
@@ -73,7 +78,7 @@ def run_attention_tracker():
                 # Send frame event to backend
                 payload = {
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "student_id": None,
+                    "class_id": CLASS_ID,
                     "gaze": gaze,
                     "head_direction": head_direction,
                     "yawning": bool(yawning),

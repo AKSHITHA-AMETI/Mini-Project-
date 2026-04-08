@@ -3,216 +3,336 @@ import pandas as pd
 import requests
 import os
 import webbrowser
+from datetime import datetime
 
 try:
     API_BASE = st.secrets["api_base"]
 except:
     API_BASE = os.getenv("FOCUS_API_URL", "http://127.0.0.1:5000")
 
-@st.cache_data(ttl=8)
-def fetch_history(limit=240):
+def api_request(method, endpoint, data=None, headers=None):
+    url = f"{API_BASE}{endpoint}"
+    if headers is None:
+        headers = {}
+    if 'token' in st.session_state:
+        headers['Authorization'] = st.session_state['token']
     try:
-        resp = requests.get(f"{API_BASE}/history", params={"limit": limit}, timeout=3)
-        if resp.ok:
-            data = resp.json().get("history", [])
-            df = pd.DataFrame(data)
-            if not df.empty:
-                df["timestamp"] = pd.to_datetime(df["timestamp"])
-                df.sort_values("timestamp", inplace=True)
-            return df
-    except Exception as e:
-        st.error(f"Error fetching history: {e}")
-    return pd.DataFrame()
-
-
-@st.cache_data(ttl=5)
-def fetch_stats():
-    try:
-        resp = requests.get(f"{API_BASE}/stats", timeout=3)
+        if method == 'GET':
+            resp = requests.get(url, headers=headers, timeout=3)
+        elif method == 'POST':
+            resp = requests.post(url, json=data, headers=headers, timeout=3)
         if resp.ok:
             return resp.json()
+        else:
+            st.error(f"API Error: {resp.status_code} - {resp.text}")
+            return None
     except Exception as e:
-        st.error(f"Error fetching stats: {e}")
-    return {}
+        st.error(f"Request failed: {e}")
+        return None
+
+@st.cache_data(ttl=8)
+def fetch_history(class_id, limit=240):
+    data = api_request('GET', f'/history/{class_id}', {'limit': limit})
+    if data:
+        df = pd.DataFrame(data.get("history", []))
+        if not df.empty:
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            df.sort_values("timestamp", inplace=True)
+        return df
+    return pd.DataFrame()
 
 @st.cache_data(ttl=5)
-def fetch_class_status():
-    try:
-        resp = requests.get(f"{API_BASE}/class_status", timeout=3)
-        if resp.ok:
-            return resp.json().get("status", "inactive")
-    except Exception as e:
-        st.error(f"Error fetching class status: {e}")
-    return "inactive"
-
-def set_class_status(status):
-    try:
-        resp = requests.post(f"{API_BASE}/class_status", json={"status": status}, timeout=3)
-        return resp.ok
-    except Exception as e:
-        st.error(f"Error setting class status: {e}")
-        return False
+def fetch_stats(class_id):
+    data = api_request('GET', f'/stats/{class_id}')
+    return data or {}
 
 @st.cache_data(ttl=5)
-def fetch_meeting_url():
-    try:
-        resp = requests.get(f"{API_BASE}/meeting", timeout=3)
-        if resp.ok:
-            return resp.json().get("url", "")
-    except Exception as e:
-        st.error(f"Error fetching meeting URL: {e}")
-    return ""
-
-def set_meeting_url(url):
-    try:
-        resp = requests.post(f"{API_BASE}/meeting", json={"url": url}, timeout=3)
-        return resp.ok
-    except Exception as e:
-        st.error(f"Error setting meeting URL: {e}")
-        return False
-
+def fetch_active_students(class_id):
+    data = api_request('GET', f'/active_students/{class_id}')
+    return data or {'active_students': 0}
 
 def login_page():
-    st.title("Student Focus Tracker")
-    st.subheader("Login")
+    st.title("Student Focus Tracker - Login")
 
-    role = st.selectbox("Select your role:", ["Student", "Teacher"])
+    tab1, tab2 = st.tabs(["Login", "Register"])
 
-    if st.button("Login"):
-        st.session_state["logged_in"] = True
-        st.session_state["role"] = role
-        st.rerun()
+    with tab1:
+        with st.form("login_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Login")
+            if submitted:
+                data = api_request('POST', '/login', {'email': email, 'password': password})
+                if data and 'token' in data:
+                    st.session_state['token'] = data['token']
+                    st.session_state['user'] = data['user']
+                    st.success("Logged in successfully!")
+                    st.rerun()
+                else:
+                    st.error("Login failed")
 
-    st.markdown("---")
-    st.write("**Student**: Join the class through the URL provided by your teacher")
-    st.write("**Teacher**: Set the meeting URL and monitor student attention data")
-
+    with tab2:
+        with st.form("register_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            confirm_password = st.text_input("Confirm Password", type="password")
+            name = st.text_input("Name")
+            role = st.selectbox("Role", ["student", "teacher", "admin"])
+            class_name = st.text_input("Class Name (for students)") if role == "student" else ""
+            submitted = st.form_submit_button("Register")
+            if submitted:
+                if password != confirm_password:
+                    st.error("Passwords do not match")
+                else:
+                    data = {'email': email, 'password': password, 'name': name, 'role': role}
+                    if role == "student":
+                        data['class_name'] = class_name
+                    resp = api_request('POST', '/register', data)
+                    if resp and 'message' in resp:
+                        st.success("Registered successfully! Please login.")
+                    else:
+                        st.error("Registration failed")
 
 def student_page():
     st.title("Student Dashboard")
-    st.subheader("Join Class Meeting")
+    user = st.session_state['user']
+    st.subheader(f"Welcome, {user['name']}")
 
-    meeting_url = fetch_meeting_url()
-    class_status = fetch_class_status()
+    # Get classes for student
+    classes = api_request('GET', '/classes')
+    active_classes = [cls for cls in classes if cls.get('status') == 'active'] if classes else []
+    if active_classes:
+        class_options = {cls['_id']: cls['class_name'] for cls in active_classes}
+        selected_class = st.selectbox("Select Active Class", list(class_options.keys()), format_func=lambda x: class_options[x])
+        class_id = selected_class
 
-    if meeting_url:
-        st.write(f"**Class Meeting URL:** {meeting_url}")
-        st.info("You must join through this official class URL provided by your teacher.")
+        # Check class status
+        cls = next((c for c in active_classes if c['_id'] == class_id), None)
+        if cls and cls['status'] == 'active':
+            st.success("Class is active. Tracking is enabled.")
+            meeting_url = cls.get('meeting_url')
+            if meeting_url:
+                st.write(f"**Class Meeting URL:** {meeting_url}")
+                st.info("You must join through this official class URL provided by your teacher.")
+                if st.button("Join Meeting & Start Tracking"):
+                    st.success(f"Opening meeting: {meeting_url}")
+                    st.info("Focus tracking will start automatically. Keep this window open.")
+                    webbrowser.open(meeting_url)
+                    st.session_state["tracking"] = True
+            else:
+                st.warning("No meeting URL provided by teacher.")
+        else:
+            st.warning("Class is not active.")
 
-        if class_status != "active":
-            st.warning("Class is not active. Tracking will start once the teacher starts the class.")
-            st.button("Join Meeting & Start Tracking", disabled=True)
-            st.stop()
+        # Show personal stats
+        stats = fetch_stats(class_id)
+        if stats:
+            col1, col2 = st.columns(2)
+            col1.metric("Your Average Focus", f"{stats.get('average_score', 0.0):.1f}%")
+            if stats.get("latest") and stats['latest'].get('student_email') == user['email']:
+                col2.metric("Your Latest Score", f"{stats['latest'].get('focus_score', 0.0):.1f}%")
 
-        if st.button("Join Meeting & Start Tracking"):
-            st.success(f"Opening meeting: {meeting_url}")
-            st.info("Focus tracking will start automatically. Keep this window open.")
-            webbrowser.open(meeting_url)
-            st.session_state["tracking"] = True
-
-        if st.session_state.get("tracking", False):
-            st.markdown("---")
-            st.subheader("Focus Tracking Active")
-            st.write(f"Meeting: {meeting_url}")
-
-            stats = fetch_stats()
-            if stats.get("latest"):
-                col1, col2 = st.columns(2)
-                col1.metric("Current Focus Score", f"{stats['latest'].get('focus_score', 0.0):.1f}%")
-                col2.metric("Gaze Direction", stats['latest'].get("gaze", "Unknown"))
-
-            if st.button("Stop Tracking"):
-                st.session_state["tracking"] = False
-                st.success("Tracking stopped")
-                st.rerun()
+        # History
+        history = fetch_history(class_id)
+        if not history.empty:
+            user_history = history[history['student_email'] == user['email']]
+            if not user_history.empty:
+                st.subheader("Your Focus History")
+                st.line_chart(user_history.set_index("timestamp")["focus_score"])
     else:
-        st.warning("No meeting URL set by teacher yet. Please wait for the teacher to provide the class URL.")
-        st.info("Refresh this page once the teacher has set the meeting URL.")
-
+        st.warning("No active classes available.")
 
 def teacher_page():
     st.title("Teacher Dashboard")
-    st.subheader("Student Focus Monitoring")
+    user = st.session_state['user']
+    st.subheader(f"Welcome, {user['name']}")
 
-    st.sidebar.header("Settings")
-    history_limit = st.sidebar.number_input("History points", min_value=20, max_value=1000, value=240, step=20)
+    tab1, tab2, tab3 = st.tabs(["Active Classes", "Create Class", "Completed Classes"])
 
-    # Class status control
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Class Control")
-    current_status = fetch_class_status()
-    st.sidebar.write(f"**Current Status:** {current_status.upper()}")
+    with tab2:
+        with st.form("create_class"):
+            class_name = st.text_input("Class Name")
+            student_emails = st.text_area("Student Emails (comma separated)")
+            meeting_url = st.text_input("Meeting URL", placeholder="https://meet.google.com/abc-defg-hij")
+            col1, col2 = st.columns(2)
+            with col1:
+                start_date = st.date_input("Start Date")
+                start_time = st.time_input("Start Time")
+            with col2:
+                end_date = st.date_input("End Date")
+                end_time = st.time_input("End Time")
+            submitted = st.form_submit_button("Create Class")
+            if submitted:
+                from datetime import datetime
+                start_datetime = datetime.combine(start_date, start_time)
+                end_datetime = datetime.combine(end_date, end_time)
+                start_time_str = start_datetime.isoformat()
+                end_time_str = end_datetime.isoformat()
+                emails = [e.strip() for e in student_emails.split(',')]
+                data = {
+                    'class_name': class_name,
+                    'student_emails': emails,
+                    'meeting_url': meeting_url,
+                    'start_time': start_time_str,
+                    'end_time': end_time_str
+                }
+                resp = api_request('POST', '/classes', data)
+                if resp and 'message' in resp:
+                    st.success("Class created!")
+                    st.cache_data.clear()
+                else:
+                    st.error("Failed to create class")
 
-    col1, col2 = st.sidebar.columns(2)
-    if col1.button("Start Class", disabled=current_status == "active"):
-        if set_class_status("active"):
-            st.sidebar.success("Class started! Students can now track focus.")
-            st.cache_data.clear()
+    with tab1:
+        classes = api_request('GET', '/classes')
+        active_classes = [cls for cls in classes if cls.get('status') == 'active'] if classes else []
+        if active_classes:
+            for cls in active_classes:
+                with st.expander(f"{cls['class_name']} - ACTIVE"):
+                    start_dt = pd.to_datetime(cls['start_time']).strftime("%Y-%m-%d %H:%M")
+                    end_dt = pd.to_datetime(cls['end_time']).strftime("%Y-%m-%d %H:%M")
+                    st.write(f"Start: {start_dt}, End: {end_dt}")
+                    st.write(f"Meeting URL: {cls.get('meeting_url', 'Not set')}")
+                    st.write(f"Students: {', '.join(cls['student_emails'])}")
+                    col1, col2, col3 = st.columns(3)
+                    if col1.button(f"Stop Class", key=f"stop_{cls['_id']}"):
+                        api_request('POST', f'/classes/{cls["_id"]}/status', {'status': 'inactive'})
+                        st.cache_data.clear()
+                        st.rerun()
+                    if col2.button(f"Complete Class", key=f"complete_{cls['_id']}"):
+                        api_request('POST', f'/classes/{cls["_id"]}/status', {'status': 'completed'})
+                        st.cache_data.clear()
+                        st.rerun()
+                    if col3.button(f"Refresh", key=f"refresh_{cls['_id']}"):
+                        st.cache_data.clear()
+                        st.rerun()
+
+                    # Class stats
+                    stats = fetch_stats(cls['_id'])
+                    active = fetch_active_students(cls['_id'])
+                    st.metric("Active Students", active['active_students'])
+                    st.metric("Average Focus", f"{stats.get('average_score', 0.0):.1f}%")
+
+                    history = fetch_history(cls['_id'])
+                    if not history.empty:
+                        st.line_chart(history.set_index("timestamp")["focus_score"])
+
+                        st.subheader("Individual Student Dashboards")
+                        for email in cls['student_emails']:
+                            student_data = history[history['student_email'] == email]
+                            if not student_data.empty:
+                                avg_focus = student_data['focus_score'].mean()
+                                st.write(f"**{email}**: Average Focus {avg_focus:.1f}%")
+                                st.line_chart(student_data.set_index("timestamp")["focus_score"])
+
+    with tab3:
+        completed_classes = [cls for cls in classes if cls.get('status') == 'completed'] if classes else []
+        if completed_classes:
+            for cls in completed_classes:
+                with st.expander(f"{cls['class_name']} - COMPLETED"):
+                    start_dt = pd.to_datetime(cls['start_time']).strftime("%Y-%m-%d %H:%M")
+                    end_dt = pd.to_datetime(cls['end_time']).strftime("%Y-%m-%d %H:%M")
+                    st.write(f"Start: {start_dt}, End: {end_dt}")
+                    st.write(f"Meeting URL: {cls.get('meeting_url', 'Not set')}")
+                    st.write(f"Students: {', '.join(cls['student_emails'])}")
+
+                    # Final stats
+                    stats = fetch_stats(cls['_id'])
+                    st.metric("Total Records", stats.get('count', 0))
+                    st.metric("Final Average Focus", f"{stats.get('average_score', 0.0):.1f}%")
+
+                    history = fetch_history(cls['_id'])
+                    if not history.empty:
+                        st.line_chart(history.set_index("timestamp")["focus_score"])
+                        st.subheader("Full History")
+                        st.dataframe(history)
+
+                        st.subheader("Individual Student Dashboards")
+                        for email in cls['student_emails']:
+                            student_data = history[history['student_email'] == email]
+                            if not student_data.empty:
+                                avg_focus = student_data['focus_score'].mean()
+                                st.write(f"**{email}**: Average Focus {avg_focus:.1f}%")
+                                st.line_chart(student_data.set_index("timestamp")["focus_score"])
         else:
-            st.sidebar.error("Failed to start class")
+            st.info("No completed classes.")
 
-    if col2.button("Stop Class", disabled=current_status == "inactive"):
-        if set_class_status("inactive"):
-            st.sidebar.success("Class stopped. Students cannot track focus.")
-            st.cache_data.clear()
+def admin_page():
+    st.title("Admin Dashboard")
+    user = st.session_state['user']
+    st.subheader(f"Welcome, {user['name']}")
+
+    # Monitor all classes
+    classes = api_request('GET', '/classes')
+    if classes:
+        active_classes = [cls for cls in classes if cls.get('status') == 'active']
+        completed_classes = [cls for cls in classes if cls.get('status') == 'completed']
+
+        st.subheader("Active Classes")
+        if active_classes:
+            for cls in active_classes:
+                with st.expander(f"{cls['class_name']} - {cls['teacher_email']}"):
+                    stats = fetch_stats(cls['_id'])
+                    active = fetch_active_students(cls['_id'])
+                    st.metric("Active Students", active['active_students'])
+                    st.metric("Average Focus", f"{stats.get('average_score', 0.0):.1f}%")
+
+                    history = fetch_history(cls['_id'])
+                    if not history.empty:
+                        st.line_chart(history.set_index("timestamp")["focus_score"])
+
+                        st.subheader("Individual Student Dashboards")
+                        for email in cls['student_emails']:
+                            student_data = history[history['student_email'] == email]
+                            if not student_data.empty:
+                                avg_focus = student_data['focus_score'].mean()
+                                st.write(f"**{email}**: Average Focus {avg_focus:.1f}%")
+                                st.line_chart(student_data.set_index("timestamp")["focus_score"])
         else:
-            st.sidebar.error("Failed to stop class")
+            st.info("No active classes.")
 
-    # Meeting URL setup
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Meeting Setup")
-    current_url = fetch_meeting_url()
-    meeting_url = st.sidebar.text_input("Set Meeting URL for Students:", value=current_url, placeholder="https://meet.google.com/abc-defg-hij")
-    if st.sidebar.button("Set Meeting URL"):
-        if set_meeting_url(meeting_url):
-            st.sidebar.success("Meeting URL updated for students")
-            st.cache_data.clear()  # Clear cache to refresh
+        st.subheader("Completed Classes")
+        if completed_classes:
+            for cls in completed_classes:
+                with st.expander(f"{cls['class_name']} - {cls['teacher_email']}"):
+                    stats = fetch_stats(cls['_id'])
+                    st.metric("Total Records", stats.get('count', 0))
+                    st.metric("Final Average Focus", f"{stats.get('average_score', 0.0):.1f}%")
+
+                    history = fetch_history(cls['_id'])
+                    if not history.empty:
+                        st.line_chart(history.set_index("timestamp")["focus_score"])
+
+                        st.subheader("Individual Student Dashboards")
+                        for email in cls['student_emails']:
+                            student_data = history[history['student_email'] == email]
+                            if not student_data.empty:
+                                avg_focus = student_data['focus_score'].mean()
+                                st.write(f"**{email}**: Average Focus {avg_focus:.1f}%")
+                                st.line_chart(student_data.set_index("timestamp")["focus_score"])
         else:
-            st.sidebar.error("Failed to update URL")
-
-    st.sidebar.markdown("---")
-    st.sidebar.write("API Base URL")
-    st.sidebar.code(API_BASE)
-
-    stats = fetch_stats()
-    history = fetch_history(history_limit)
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Records", stats.get("count", 0))
-    col2.metric("Average Focus", f"{stats.get('average_score', 0.0):.1f}%")
-    if stats.get("latest"):
-        col3.metric("Latest Score", f"{stats['latest'].get('focus_score', 0.0):.1f}%")
+            st.info("No completed classes.")
     else:
-        col3.metric("Latest Score", "N/A")
-
-    if history.empty:
-        st.warning("No history data available yet. Students need to start tracking.")
-    else:
-        st.subheader("Focus Score Time Series")
-        st.line_chart(history.set_index("timestamp")["focus_score"])
-        st.subheader("Raw Table")
-        st.dataframe(history[["timestamp", "head_direction", "focus_score"]].sort_values("timestamp", ascending=False))
-    if st.button("Refresh now"):
-        st.cache_data.clear()
-        st.rerun()
-    st.info("Dashboard auto-refreshes every 10 seconds")
-
+        st.warning("No classes.")
 
 def main():
-    if not st.session_state.get("logged_in", False):
+    if 'token' not in st.session_state:
         login_page()
     else:
-        role = st.session_state.get("role", "Student")
+        user = st.session_state['user']
+        role = user['role']
 
-        if role == "Student":
+        if role == "student":
             student_page()
-        else:
+        elif role == "teacher":
             teacher_page()
+        else:
+            admin_page()
 
         if st.sidebar.button("Logout"):
-            st.session_state.clear()
+            del st.session_state['token']
+            del st.session_state['user']
             st.rerun()
-
 
 if __name__ == "__main__":
     main()
