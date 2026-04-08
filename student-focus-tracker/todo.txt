@@ -1,0 +1,4 @@
+do login register inteface seperately for teacher and studetn with class name email id these ind of basic info and store it database using mongodb even change before databaase to mongodb the teacher have to add the members only those can join with the provided emails and time of the class also must decided by teacher
+after creation of above interface i must need to get the data of every student individually who logs in and join the class specified by teacher and whole class dashboard no.of students active 
+also create an admin who monitors all these as teacher cant access while teaaching and sends alerts to the student if is not focused 
+and even login as admin also must be added 
