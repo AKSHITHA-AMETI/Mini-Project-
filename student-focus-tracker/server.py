@@ -1,445 +1,490 @@
 import os
-import sqlite3
-import hashlib
-import secrets
-from datetime import datetime, timezone
-from flask import Flask, g, jsonify, request
-
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "attention.db")
-
+from datetime import datetime, timezone, timedelta
+from flask import Flask, jsonify, request, session
+from pymongo import MongoClient
+from bson import ObjectId
+from werkzeug.security import generate_password_hash, check_password_hash
+import bcrypt
+from flask_mail import Mail, Message
+import jwt
+import pandas as pd
+import pytz
 app = Flask(__name__)
+app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'jwt-secret-key')
 
+def generate_token(user_id):
+    payload = {
+        'user_id': user_id,
+        'exp': datetime.utcnow() + timedelta(hours=24)
+    }
+    return jwt.encode(payload, app.config['JWT_SECRET_KEY'], algorithm='HS256')
 
-def get_db():
-    db = getattr(g, "db", None)
-    if db is None:
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        db = sqlite3.connect(DB_PATH)
-        db.row_factory = sqlite3.Row
-        g.db = db
-    return db
-
-
-def close_db(e=None):
-    db = getattr(g, "db", None)
-    if db is not None:
-        db.close()
-
-
-@app.teardown_appcontext
-def teardown_db(exception):
-    close_db(exception)
-
-
-def hash_password(password):
-    """Hash password with salt"""
-    salt = secrets.token_hex(16)
-    pwd_hash = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000)
-    return f"{salt}${pwd_hash.hex()}"
-
-
-def verify_password(stored_hash, password):
-    """Verify password against stored hash"""
+def verify_token(token):
     try:
-        salt, pwd_hash = stored_hash.split('$')
-        new_hash = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000)
-        return new_hash.hex() == pwd_hash
-    except:
-        return False
+        payload = jwt.decode(token, app.config['JWT_SECRET_KEY'], algorithms=['HS256'])
+        return payload['user_id']
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+client = MongoClient('mongodb://localhost:27017/', serverSelectionTimeoutMS=5000)
+try:
+    client.admin.command('ping')
+    print("MongoDB connected successfully")
+except Exception as e:
+    print(f"MongoDB connection failed: {e}")
+    print("Please ensure MongoDB is installed and running on localhost:27017")
+    exit(1)
 
+db = client['student_focus_tracker']
 
-def init_db():
-    db = get_db()
-    db.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            email TEXT,
-            role TEXT NOT NULL,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-        
-        CREATE TABLE IF NOT EXISTS classes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            teacher_id INTEGER NOT NULL,
-            class_name TEXT NOT NULL,
-            scheduled_time TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (teacher_id) REFERENCES users(id)
-        );
-        
-        CREATE TABLE IF NOT EXISTS class_links (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            class_id INTEGER NOT NULL,
-            link TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (class_id) REFERENCES classes(id)
-        );
-        
-        CREATE TABLE IF NOT EXISTS enrollments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            class_id INTEGER NOT NULL,
-            student_id INTEGER NOT NULL,
-            enrolled_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (class_id) REFERENCES classes(id),
-            FOREIGN KEY (student_id) REFERENCES users(id),
-            UNIQUE(class_id, student_id)
-        );
-        
-        CREATE TABLE IF NOT EXISTS frames (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            student_id TEXT,
-            class_id INTEGER,
-            gaze TEXT,
-            head_direction TEXT,
-            yawning INTEGER,
-            mouth_distance REAL,
-            laughing INTEGER,
-            mouth_width REAL,
-            mouth_height REAL,
-<<<<<<< Updated upstream
-            focus_score REAL
-        );
-=======
-            focus_score REAL,
-            FOREIGN KEY (class_id) REFERENCES classes(id)
-        );
-        
->>>>>>> Stashed changes
-        CREATE TABLE IF NOT EXISTS meeting (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            url TEXT
-        );
-        INSERT OR IGNORE INTO meeting (id, url) VALUES (1, '');
-<<<<<<< Updated upstream
-        CREATE TABLE IF NOT EXISTS class_status (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            status TEXT DEFAULT 'inactive'
-        );
-        INSERT OR IGNORE INTO class_status (id, status) VALUES (1, 'inactive');
-=======
->>>>>>> Stashed changes
-        """
-    )
-    db.commit()
+# Flask-Mail setup
+app.config['MAIL_SERVER'] = 'smtp.gmail.com'
+app.config['MAIL_PORT'] = 587
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
+mail = Mail(app)
 
-
-@app.route("/auth/register", methods=["POST"])
+@app.route('/register', methods=['POST'])
 def register():
-    """Register a new user (student or teacher)"""
-    data = request.get_json(force=True, silent=True)
-    if not data:
-        return jsonify({"error": "JSON payload required"}), 400
-    
-    username = data.get("username", "").strip()
-    password = data.get("password", "").strip()
-    email = data.get("email", "").strip()
-    role = data.get("role", "student").lower()  # 'student' or 'teacher'
-    
-    if not username or not password:
-        return jsonify({"error": "username and password required"}), 400
-    
-    if role not in ["student", "teacher"]:
-        return jsonify({"error": "role must be 'student' or 'teacher'"}), 400
-    
-    db = get_db()
-    try:
-        password_hash = hash_password(password)
-        cursor = db.execute(
-            "INSERT INTO users (username, password_hash, email, role) VALUES (?, ?, ?, ?)",
-            (username, password_hash, email, role)
-        )
-        user_id = cursor.lastrowid
-        db.commit()
-        return jsonify({"status": "ok", "user_id": user_id, "role": role}), 201
-    except sqlite3.IntegrityError:
-        return jsonify({"error": "username already exists"}), 409
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    data = request.get_json()
+    email = data.get('email')
+    password = data.get('password')
+    role = data.get('role')  # 'teacher', 'student', 'admin'
+    name = data.get('name')
+    class_name = data.get('class_name') if role == 'student' else None
 
+    if not all([email, password, role, name]):
+        return jsonify({'error': 'Missing required fields'}), 400
 
-@app.route("/auth/login", methods=["POST"])
+    if db.users.find_one({'email': email}):
+        return jsonify({'error': 'User already exists'}), 400
+
+    hashed_password = generate_password_hash(password, method='pbkdf2:sha256')
+
+    user_doc = {
+        'email': email,
+        'password': hashed_password,
+        'role': role,
+        'name': name,
+        'class_name': class_name
+    }
+
+    db.users.insert_one(user_doc)
+    return jsonify({'message': 'User registered successfully'}), 201
+
+@app.route('/login', methods=['POST'])
 def login():
-    """Login user"""
-    data = request.get_json(force=True, silent=True)
-    if not data:
-        return jsonify({"error": "JSON payload required"}), 400
-    
-    username = data.get("username", "").strip()
-    password = data.get("password", "").strip()
-    
-    if not username or not password:
-        return jsonify({"error": "username and password required"}), 400
-    
-    db = get_db()
-    user = db.execute(
-        "SELECT id, username, role, password_hash FROM users WHERE username = ?",
-        (username,)
-    ).fetchone()
-    
-    if not user or not verify_password(user["password_hash"], password):
-        return jsonify({"error": "invalid username or password"}), 401
-    
+    data = request.get_json()
+    email = data.get('email')
+    password = data.get('password')
+
+    user_data = db.users.find_one({'email': email})
+    if user_data and check_password_hash(user_data['password'], password):
+        token = generate_token(str(user_data['_id']))
+        return jsonify({'message': 'Logged in successfully', 'role': user_data['role'], 'token': token, 'user': {'email': user_data['email'], 'name': user_data['name'], 'role': user_data['role']}}), 200
+    return jsonify({'error': 'Invalid credentials'}), 401
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    return jsonify({'message': 'Logged out successfully'}), 200
+
+@app.route('/classes', methods=['POST'])
+def create_class():
+    current_user = get_current_user()
+    if not current_user or current_user['role'] != 'teacher':
+        return jsonify({'error': 'Only teachers can create classes'}), 403
+
+    data = request.get_json()
+    class_name = data.get('class_name')
+    class_password = data.get('class_password')
+    start_time = data.get('start_time')
+    end_time = data.get('end_time')
+
+    if not all([class_name, class_password]):
+        return jsonify({'error': 'Class name and password are required'}), 400
+
+    # Hash the class password
+    hashed_class_password = generate_password_hash(class_password, method='pbkdf2:sha256')
+
+    class_doc = {
+        'teacher_email': current_user['email'],
+        'teacher_name': current_user['name'],
+        'class_name': class_name,
+        'class_password': hashed_class_password,
+        'enrolled_students': [],
+        'start_time': start_time,
+        'end_time': end_time,
+        'meeting_url': None,
+        'status': 'inactive',
+        'created_at': datetime.now(timezone.utc).isoformat()
+    }
+
+    result = db.classes.insert_one(class_doc)
     return jsonify({
-        "status": "ok",
-        "user_id": user["id"],
-        "username": user["username"],
-        "role": user["role"]
+        'message': 'Class created successfully',
+        'class_id': str(result.inserted_id)
+    }), 201
+
+@app.route('/classes', methods=['GET'])
+def get_classes():
+    current_user = get_current_user()
+    if not current_user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    now = pd.Timestamp.now(tz='Asia/Kolkata')
+
+    if current_user['role'] == 'teacher':
+        classes = list(db.classes.find({'teacher_email': current_user['email']}))
+    elif current_user['role'] == 'student':
+        classes = list(db.classes.find({'enrolled_students': current_user['email']}))
+    else:  # admin
+        classes = list(db.classes.find({}))
+
+    for cls in classes:
+        if cls['start_time'] and cls['end_time']:
+            start = pd.to_datetime(cls['start_time'], utc=True).tz_convert('Asia/Kolkata')
+            end = pd.to_datetime(cls['end_time'], utc=True).tz_convert('Asia/Kolkata')
+            if cls['status'] != 'completed':
+                if start <= now <= end:
+                    cls['status'] = 'active'
+                    db.classes.update_one({'_id': cls['_id']}, {'$set': {'status': 'active'}})
+                elif now > end:
+                    cls['status'] = 'inactive'
+                    db.classes.update_one({'_id': cls['_id']}, {'$set': {'status': 'inactive'}})
+        cls['_id'] = str(cls['_id'])
+        cls.pop('class_password', None)  # Don't send password hash to frontend
+
+    return jsonify(classes), 200
+
+@app.route('/classes/available', methods=['GET'])
+def get_available_classes():
+    """Get all classes available for student to join (not yet enrolled)"""
+    current_user = get_current_user()
+    if not current_user or current_user['role'] != 'student':
+        return jsonify({'error': 'Only students can view available classes'}), 403
+
+    # Get all classes where student is not enrolled
+    available_classes = list(db.classes.find({
+        'enrolled_students': {'$ne': current_user['email']},
+        'status': {'$ne': 'completed'}
+    }))
+
+    for cls in available_classes:
+        cls['_id'] = str(cls['_id'])
+        cls.pop('class_password', None)  # Don't send password hash
+        cls['student_count'] = len(cls.get('enrolled_students', []))
+
+    return jsonify(available_classes), 200
+
+@app.route('/classes/<class_id>/join', methods=['POST'])
+def join_class(class_id):
+    """Student joins a class with password"""
+    current_user = get_current_user()
+    if not current_user or current_user['role'] != 'student':
+        return jsonify({'error': 'Only students can join classes'}), 403
+
+    data = request.get_json()
+    password = data.get('password')
+
+    if not password:
+        return jsonify({'error': 'Password required'}), 400
+
+    cls = db.classes.find_one({'_id': ObjectId(class_id)})
+    if not cls:
+        return jsonify({'error': 'Class not found'}), 404
+
+    if check_password_hash(cls['class_password'], password):
+        # Add student to enrolled_students if not already there
+        if current_user['email'] not in cls['enrolled_students']:
+            db.classes.update_one(
+                {'_id': ObjectId(class_id)},
+                {'$push': {'enrolled_students': current_user['email']}}
+            )
+        return jsonify({'message': 'Joined class successfully'}), 200
+    else:
+        return jsonify({'error': 'Invalid password'}), 401
+
+@app.route('/classes/<class_id>/meeting-link', methods=['POST'])
+def post_meeting_link(class_id):
+    """Teacher posts meeting link for a class"""
+    current_user = get_current_user()
+    if not current_user or current_user['role'] != 'teacher':
+        return jsonify({'error': 'Only teachers can post meeting links'}), 403
+
+    data = request.get_json()
+    meeting_url = data.get('meeting_url')
+
+    if not meeting_url:
+        return jsonify({'error': 'Meeting URL required'}), 400
+
+    result = db.classes.update_one(
+        {'_id': ObjectId(class_id), 'teacher_email': current_user['email']},
+        {'$set': {'meeting_url': meeting_url}}
+    )
+
+    if result.matched_count == 0:
+        return jsonify({'error': 'Class not found or unauthorized'}), 404
+
+    return jsonify({'message': 'Meeting link posted successfully'}), 200
+
+@app.route('/classes/<class_id>/status', methods=['POST'])
+def set_class_status(class_id):
+    current_user = get_current_user()
+    if not current_user or current_user['role'] != 'teacher':
+        return jsonify({'error': 'Only teachers can change class status'}), 403
+
+    data = request.get_json()
+    status = data.get('status')  # 'active', 'inactive', 'completed'
+
+    if status not in ['active', 'inactive', 'completed']:
+        return jsonify({'error': 'Invalid status'}), 400
+
+    if status == 'active':
+        # Deactivate all other active classes for this teacher
+        db.classes.update_many({'teacher_email': current_user['email'], 'status': 'active'}, {'$set': {'status': 'inactive'}})
+
+    db.classes.update_one({'_id': ObjectId(class_id), 'teacher_email': current_user['email']}, {'$set': {'status': status}})
+    return jsonify({'message': 'Class status updated'}), 200
+
+@app.route('/frame', methods=['POST'])
+def add_frame():
+    current_user = get_current_user()
+    if not current_user or current_user['role'] != 'student':
+        return jsonify({'error': 'Only students can send frame data'}), 403
+
+    ist = pytz.timezone('Asia/Kolkata')
+
+    data = request.get_json()
+    class_id = data.get('class_id')
+    timestamp = data.get('timestamp', datetime.now(ist).isoformat())
+    gaze = data.get('gaze')
+    head_direction = data.get('head_direction')
+    yawning = data.get('yawning', False)
+    mouth_distance = data.get('mouth_distance', 0.0)
+    laughing = data.get('laughing', False)
+    mouth_width = data.get('mouth_width', 0.0)
+    mouth_height = data.get('mouth_height', 0.0)
+    focus_score = data.get('focus_score', 0.0)
+
+    frame_doc = {
+        'timestamp': timestamp,
+        'student_email': current_user['email'],
+        'class_id': class_id,
+        'gaze': gaze,
+        'head_direction': head_direction,
+        'yawning': yawning,
+        'mouth_distance': mouth_distance,
+        'laughing': laughing,
+        'mouth_width': mouth_width,
+        'mouth_height': mouth_height,
+        'focus_score': focus_score
+    }
+
+    db.frames.insert_one(frame_doc)
+
+    # Check if focus score is low and send alert
+    if focus_score < 50:  # threshold
+        send_alert(current_user['email'], class_id, focus_score)
+
+    return jsonify({'status': 'ok'}), 201
+
+def send_alert(student_email, class_id, focus_score):
+    msg = Message('Focus Alert', sender=app.config['MAIL_USERNAME'], recipients=[student_email])
+    msg.body = f'Your focus score is low ({focus_score}%). Please pay attention!'
+    mail.send(msg)
+
+def get_current_user():
+    token = request.headers.get('Authorization')
+    if token:
+        user_id = verify_token(token)
+        if user_id:
+            user_data = db.users.find_one({'_id': ObjectId(user_id)})
+            if user_data:
+                return user_data  # return dict
+    return None
+
+@app.route('/history/<class_id>', methods=['GET'])
+def get_history(class_id):
+    current_user = get_current_user()
+    if not current_user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    limit = int(request.args.get('limit', 240))
+
+    if current_user['role'] == 'student':
+        frames = list(db.frames.find({'student_email': current_user['email'], 'class_id': class_id}).sort('_id', -1).limit(limit))
+    elif current_user['role'] == 'teacher':
+        # Get frames for all students in the class
+        cls = db.classes.find_one({'_id': ObjectId(class_id), 'teacher_email': current_user['email']})
+        if not cls:
+            return jsonify({'error': 'Class not found'}), 404
+        enrolled_students = cls['enrolled_students']
+        frames = list(db.frames.find({'student_email': {'$in': enrolled_students}, 'class_id': class_id}).sort('_id', -1).limit(limit))
+    else:  # admin
+        frames = list(db.frames.find({'class_id': class_id}).sort('_id', -1).limit(limit))
+
+    for frame in frames:
+        frame['_id'] = str(frame['_id'])
+
+    return jsonify({'history': frames}), 200
+
+@app.route('/stats/<class_id>', methods=['GET'])
+def get_stats(class_id):
+    current_user = get_current_user()
+    if not current_user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    if current_user['role'] == 'student':
+        pipeline = [
+            {'$match': {'student_email': current_user['email'], 'class_id': class_id}},
+            {'$group': {'_id': None, 'count': {'$sum': 1}, 'average_score': {'$avg': '$focus_score'}}}
+        ]
+    elif current_user['role'] == 'teacher':
+        cls = db.classes.find_one({'_id': ObjectId(class_id), 'teacher_email': current_user['email']})
+        if not cls:
+            return jsonify({'error': 'Class not found'}), 404
+        enrolled_students = cls['enrolled_students']
+        pipeline = [
+            {'$match': {'student_email': {'$in': enrolled_students}, 'class_id': class_id}},
+            {'$group': {'_id': None, 'count': {'$sum': 1}, 'average_score': {'$avg': '$focus_score'}}}
+        ]
+    else:  # admin
+        pipeline = [
+            {'$match': {'class_id': class_id}},
+            {'$group': {'_id': None, 'count': {'$sum': 1}, 'average_score': {'$avg': '$focus_score'}}}
+        ]
+
+    result = list(db.frames.aggregate(pipeline))
+    if result:
+        stats = result[0]
+        stats.pop('_id')
+    else:
+        stats = {'count': 0, 'average_score': 0.0}
+
+    # Get latest frame
+    latest = db.frames.find_one({'class_id': class_id}, sort=[('_id', -1)])
+    if latest:
+        latest['_id'] = str(latest['_id'])
+        stats['latest'] = latest
+    else:
+        stats['latest'] = None
+
+    return jsonify(stats), 200
+
+@app.route('/classes/<class_id>/attendance', methods=['GET'])
+def get_attendance(class_id):
+    """Get attendance and average attention for each student in a class (teacher only)"""
+    current_user = get_current_user()
+    if not current_user or current_user['role'] != 'teacher':
+        return jsonify({'error': 'Only teachers can view attendance'}), 403
+
+    cls = db.classes.find_one({'_id': ObjectId(class_id), 'teacher_email': current_user['email']})
+    if not cls:
+        return jsonify({'error': 'Class not found'}), 404
+
+    enrolled_students = cls['enrolled_students']
+    attendance_report = []
+
+    for student_email in enrolled_students:
+        # Get student name from users collection
+        student_user = db.users.find_one({'email': student_email})
+        student_name = student_user['name'] if student_user else student_email
+
+        # Aggregate data for this student
+        pipeline = [
+            {'$match': {'student_email': student_email, 'class_id': class_id}},
+            {'$group': {
+                '_id': None,
+                'frames_sent': {'$sum': 1},
+                'avg_attention': {'$avg': '$focus_score'},
+                'last_active': {'$max': '$timestamp'}
+            }}
+        ]
+
+        result = list(db.frames.aggregate(pipeline))
+        if result:
+            data = result[0]
+            attendance_report.append({
+                'student_email': student_email,
+                'student_name': student_name,
+                'frames_sent': data.get('frames_sent', 0),
+                'avg_attention': round(data.get('avg_attention', 0), 2),
+                'last_active': data.get('last_active'),
+                'attended': data.get('frames_sent', 0) > 0
+            })
+        else:
+            attendance_report.append({
+                'student_email': student_email,
+                'student_name': student_name,
+                'frames_sent': 0,
+                'avg_attention': 0.0,
+                'last_active': None,
+                'attended': False
+            })
+
+    return jsonify({'attendance': attendance_report}), 200
+
+@app.route('/classes/categorized', methods=['GET'])
+def get_categorized_classes():
+    """Get classes categorized as active, attended, and future for current user"""
+    current_user = get_current_user()
+    if not current_user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    now = pd.Timestamp.now(tz='Asia/Kolkata')
+
+    # Get user's classes
+    if current_user['role'] == 'teacher':
+        all_classes = list(db.classes.find({'teacher_email': current_user['email']}))
+    elif current_user['role'] == 'student':
+        all_classes = list(db.classes.find({'enrolled_students': current_user['email']}))
+    else:
+        all_classes = list(db.classes.find({}))
+
+    active = []
+    attended = []
+    future = []
+
+    for cls in all_classes:
+        cls['_id'] = str(cls['_id'])
+        cls.pop('class_password', None)
+
+        start = pd.to_datetime(cls['start_time'], utc=True).tz_convert('Asia/Kolkata') if cls.get('start_time') else None
+        end = pd.to_datetime(cls['end_time'], utc=True).tz_convert('Asia/Kolkata') if cls.get('end_time') else None
+
+        if start and end:
+            if start <= now <= end:
+                cls['status'] = 'active'
+                active.append(cls)
+            elif now > end:
+                cls['status'] = 'completed'
+                attended.append(cls)
+            else:
+                cls['status'] = 'future'
+                future.append(cls)
+        else:
+            future.append(cls)
+
+    return jsonify({
+        'active': active,
+        'attended': attended,
+        'future': future
     }), 200
 
+@app.route('/active_students/<class_id>', methods=['GET'])
+def get_active_students(class_id):
+    current_user = get_current_user()
+    if not current_user:
+        return jsonify({'error': 'Unauthorized'}), 401
 
-@app.route("/classes", methods=["GET"])
-def list_classes():
-    """List classes for student (enrolled) or teacher (created)"""
-    user_id = request.args.get("user_id")
-    role = request.args.get("role")
-    
-    if not user_id or not role:
-        return jsonify({"error": "user_id and role required"}), 400
-    
-    db = get_db()
-    if role == "teacher":
-        cursor = db.execute(
-            """SELECT c.id, c.class_name, c.teacher_id, c.scheduled_time, 
-                      cl.link, c.created_at
-               FROM classes c
-               LEFT JOIN class_links cl ON c.id = cl.class_id
-               WHERE c.teacher_id = ? ORDER BY c.scheduled_time DESC""",
-            (user_id,)
-        )
-    else:  # student
-        cursor = db.execute(
-            """SELECT c.id, c.class_name, c.teacher_id, c.scheduled_time,
-                      cl.link, c.created_at
-               FROM classes c
-               LEFT JOIN class_links cl ON c.id = cl.class_id
-               JOIN enrollments e ON c.id = e.class_id
-               WHERE e.student_id = ? ORDER BY c.scheduled_time DESC""",
-            (user_id,)
-        )
-    
-    rows = cursor.fetchall()
-    classes = [dict(row) for row in rows]
-    return jsonify({"classes": classes}), 200
+    # Get students who have sent frames recently (e.g., last 5 minutes)
+    recent_time = datetime.now(timezone.utc).timestamp() - 300  # 5 minutes ago
+    recent_frames = db.frames.find({'class_id': class_id, 'timestamp': {'$gte': datetime.fromtimestamp(recent_time, tz=timezone.utc).isoformat()}})
+    active_emails = set(frame['student_email'] for frame in recent_frames)
+    active_count = len(active_emails)
+    return jsonify({'active_students': active_count, 'emails': list(active_emails)}), 200
 
-
-@app.route("/classes", methods=["POST"])
-def create_class():
-    """Create a new class (teacher only)"""
-    data = request.get_json(force=True, silent=True)
-    if not data:
-        return jsonify({"error": "JSON payload required"}), 400
-    
-    teacher_id = data.get("teacher_id")
-    class_name = data.get("class_name", "").strip()
-    scheduled_time = data.get("scheduled_time")
-    
-    if not teacher_id or not class_name:
-        return jsonify({"error": "teacher_id and class_name required"}), 400
-    
-    db = get_db()
-    cursor = db.execute(
-        "INSERT INTO classes (teacher_id, class_name, scheduled_time) VALUES (?, ?, ?)",
-        (teacher_id, class_name, scheduled_time)
-    )
-    class_id = cursor.lastrowid
-    db.commit()
-    
-    return jsonify({"status": "ok", "class_id": class_id}), 201
-
-
-@app.route("/classes/<int:class_id>/link", methods=["POST"])
-def add_class_link(class_id):
-    """Add or update meeting link for a class (teacher only)"""
-    data = request.get_json(force=True, silent=True)
-    if not data or "link" not in data:
-        return jsonify({"error": "link required"}), 400
-    
-    link = data.get("link", "").strip()
-    
-    db = get_db()
-    existing = db.execute(
-        "SELECT id FROM class_links WHERE class_id = ?",
-        (class_id,)
-    ).fetchone()
-    
-    if existing:
-        db.execute(
-            "UPDATE class_links SET link = ? WHERE class_id = ?",
-            (link, class_id)
-        )
-    else:
-        db.execute(
-            "INSERT INTO class_links (class_id, link) VALUES (?, ?)",
-            (class_id, link)
-        )
-    db.commit()
-    
-    return jsonify({"status": "ok"}), 200
-
-
-@app.route("/users/search", methods=["GET"])
-def search_users():
-    """Search for users by email or username"""
-    query = request.args.get("q", "").strip()
-    
-    if not query or len(query) < 2:
-        return jsonify({"error": "query must be at least 2 characters"}), 400
-    
-    db = get_db()
-    cursor = db.execute(
-        """SELECT id, username, email, role 
-           FROM users 
-           WHERE (email LIKE ? OR username LIKE ?) AND role = 'student'
-           LIMIT 10""",
-        (f"%{query}%", f"%{query}%")
-    )
-    
-    users = [dict(row) for row in cursor.fetchall()]
-    return jsonify({"users": users}), 200
-
-
-@app.route("/classes/<int:class_id>/enroll", methods=["POST"])
-def enroll_student(class_id):
-    """Enroll a student in a class"""
-    data = request.get_json(force=True, silent=True)
-    if not data or "student_id" not in data:
-        return jsonify({"error": "student_id required"}), 400
-    
-    student_id = data.get("student_id")
-    
-    db = get_db()
-    try:
-        db.execute(
-            "INSERT INTO enrollments (class_id, student_id) VALUES (?, ?)",
-            (class_id, student_id)
-        )
-        db.commit()
-        return jsonify({"status": "ok"}), 201
-    except sqlite3.IntegrityError:
-        return jsonify({"error": "student already enrolled"}), 409
-
-
-@app.route("/classes/<int:class_id>/students", methods=["GET"])
-def get_class_students(class_id):
-    """Get all students in a class with their focus stats"""
-    db = get_db()
-    
-    cursor = db.execute(
-        """SELECT u.id, u.username, 
-                  AVG(f.focus_score) as avg_focus,
-                  COUNT(f.id) as frame_count
-           FROM enrollments e
-           JOIN users u ON e.student_id = u.id
-           LEFT JOIN frames f ON f.student_id = CAST(u.id AS TEXT) AND f.class_id = ?
-           WHERE e.class_id = ?
-           GROUP BY u.id, u.username""",
-        (class_id, class_id)
-    )
-    
-    students = [dict(row) for row in cursor.fetchall()]
-    return jsonify({"students": students}), 200
-
-
-@app.route("/frame", methods=["POST"])
-def add_frame():
-    data = request.get_json(force=True, silent=True)
-    if not data:
-        return jsonify({"error": "JSON payload required"}), 400
-
-    timestamp = data.get("timestamp", datetime.now(timezone.utc).isoformat())
-    student_id = data.get("student_id")
-    class_id = data.get("class_id")
-    gaze = data.get("gaze")
-    head_direction = data.get("head_direction")
-    yawning = 1 if data.get("yawning") else 0
-    mouth_distance = float(data.get("mouth_distance", 0.0))
-    laughing = 1 if data.get("laughing") else 0
-    mouth_width = float(data.get("mouth_width", 0.0))
-    mouth_height = float(data.get("mouth_height", 0.0))
-    focus_score = float(data.get("focus_score", 0.0))
-
-    db = get_db()
-    db.execute(
-        "INSERT INTO frames (timestamp, student_id, class_id, gaze, head_direction, yawning, mouth_distance, laughing, mouth_width, mouth_height, focus_score) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (timestamp, student_id, class_id, gaze, head_direction, yawning, mouth_distance, laughing, mouth_width, mouth_height, focus_score),
-    )
-    db.commit()
-
-    return jsonify({"status": "ok"}), 201
-
-
-@app.route("/history", methods=["GET"])
-def get_history():
-    limit = int(request.args.get("limit", 240))
-    db = get_db()
-    cursor = db.execute(
-        "SELECT * FROM frames ORDER BY id DESC LIMIT ?", (limit,)
-    )
-    rows = cursor.fetchall()
-    history = [dict(row) for row in rows]
-    return jsonify({"history": history})
-
-
-@app.route("/meeting", methods=["GET"])
-def get_meeting():
-    db = get_db()
-    row = db.execute("SELECT url FROM meeting WHERE id = 1").fetchone()
-    return jsonify({"url": row["url"] if row else ""})
-
-
-@app.route("/meeting", methods=["POST"])
-def set_meeting():
-    data = request.get_json(force=True, silent=True)
-    if not data or "url" not in data:
-        return jsonify({"error": "url required"}), 400
-    url = data["url"]
-    db = get_db()
-    db.execute("UPDATE meeting SET url = ? WHERE id = 1", (url,))
-    db.commit()
-    return jsonify({"status": "ok"}), 200
-
-
-@app.route("/class_status", methods=["GET"])
-def get_class_status():
-    db = get_db()
-    row = db.execute("SELECT status FROM class_status WHERE id = 1").fetchone()
-    return jsonify({"status": row["status"] if row else "inactive"})
-
-
-@app.route("/class_status", methods=["POST"])
-def set_class_status():
-    data = request.get_json(force=True, silent=True)
-    if not data or "status" not in data:
-        return jsonify({"error": "status required"}), 400
-    status = data["status"]
-    if status not in ["active", "inactive"]:
-        return jsonify({"error": "status must be 'active' or 'inactive'"}), 400
-    db = get_db()
-    db.execute("UPDATE class_status SET status = ? WHERE id = 1", (status,))
-    db.commit()
-    return jsonify({"status": "ok"}), 200
-
-
-@app.route("/stats", methods=["GET"])
-def get_stats():
-    db = get_db()
-    cursor = db.execute("SELECT COUNT(*) as count, AVG(focus_score) as average_score FROM frames")
-    row = cursor.fetchone()
-    count = row["count"] if row else 0
-    average_score = row["average_score"] if row and row["average_score"] else 0.0
-
-    cursor = db.execute("SELECT * FROM frames ORDER BY id DESC LIMIT 1")
-    latest = cursor.fetchone()
-    latest_data = dict(latest) if latest else None
-
-    return jsonify({"count": count, "average_score": average_score, "latest": latest_data})
-
-
-if __name__ == "__main__":
-    with app.app_context():
-        init_db()
-    app.run(host="0.0.0.0", port=5000, debug=True)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
