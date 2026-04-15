@@ -1,0 +1,35 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  min-height: 100%;
+}
+
+body {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  background: linear-gradient(180deg, #eef2ff 0%, #eef2ff 35%, #f8fafc 100%);
+  color: #1f2937;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  outline: none;
+}
+
+input, select, button {
+  font-family: inherit;
+}
+
+.App {
+  min-height: 100vh;
+}
+
+.form-error {
+  color: #b91c1c;
+  margin: 0.5rem 0;
+  font-weight: 600;
+}
