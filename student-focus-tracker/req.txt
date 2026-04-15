@@ -5,8 +5,4 @@ streamlit
 flask
 pandas
 requests
-pymongo
-flask-login
-bcrypt
-flask-mail
-PyJWT
+typing-extensions
