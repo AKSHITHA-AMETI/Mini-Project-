@@ -1,21 +1,26 @@
 import os
-from datetime import datetime, timezone, timedelta
-from flask import Flask, jsonify, request, session
+from datetime import datetime, timedelta
+from flask import Flask, jsonify, request
 from pymongo import MongoClient
 from bson import ObjectId
 from werkzeug.security import generate_password_hash, check_password_hash
-import bcrypt
 from flask_mail import Mail, Message
 import jwt
-import pandas as pd
 import pytz
-app = Flask(__name__)
-app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'your-32-character-jwt-secret-key-here')
+from flask_cors import CORS
 
+app = Flask(__name__)
+CORS(app)
+app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'jwt-secret-key')
+
+# IST timezone
+ist = pytz.timezone('Asia/Kolkata')
+
+# ================= JWT =================
 def generate_token(user_id):
     payload = {
         'user_id': user_id,
-        'exp': datetime.utcnow() + timedelta(hours=24)
+        'exp': datetime.now(ist) + timedelta(hours=24)
     }
     return jwt.encode(payload, app.config['JWT_SECRET_KEY'], algorithm='HS256')
 
@@ -23,568 +28,380 @@ def verify_token(token):
     try:
         payload = jwt.decode(token, app.config['JWT_SECRET_KEY'], algorithms=['HS256'])
         return payload['user_id']
-    except jwt.ExpiredSignatureError:
+    except:
         return None
-    except jwt.InvalidTokenError:
-        return None
-client = MongoClient('mongodb://localhost:27017/', serverSelectionTimeoutMS=5000)
-try:
-    client.admin.command('ping')
-    print("MongoDB connected successfully")
-except Exception as e:
-    print(f"MongoDB connection failed: {e}")
-    print("Please ensure MongoDB is installed and running on localhost:27017")
-    exit(1)
 
+# ================= DB =================
+client = MongoClient('mongodb://localhost:27017/')
 db = client['student_focus_tracker']
 
-# Flask-Mail setup
+# ================= Mail =================
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
 app.config['MAIL_PORT'] = 587
 app.config['MAIL_USE_TLS'] = True
 app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
 app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
+app.config['TEACHER_REG_CODE'] = os.getenv('TEACHER_REG_CODE', 'teach1234')
+app.config['ADMIN_REG_CODE'] = os.getenv('ADMIN_REG_CODE', 'admin1234')
 mail = Mail(app)
 
-@app.route('/register', methods=['POST'])
-def register():
-    data = request.get_json()
-    email = data.get('email')
-    password = data.get('password')
-    role = data.get('role')  # 'teacher', 'student', 'admin'
-    name = data.get('name')
-    class_name = data.get('class_name') if role == 'student' else None
-
-    if not all([email, password, role, name]):
-        return jsonify({'error': 'Missing required fields'}), 400
-
-    if db.users.find_one({'email': email}):
-        return jsonify({'error': 'User already exists'}), 400
-
-    hashed_password = generate_password_hash(password, method='pbkdf2:sha256')
-
-    user_doc = {
-        'email': email,
-        'password': hashed_password,
-        'role': role,
-        'name': name,
-        'class_name': class_name
-    }
-
-    db.users.insert_one(user_doc)
-    return jsonify({'message': 'User registered successfully'}), 201
-
-@app.route('/login', methods=['POST'])
-def login():
-    data = request.get_json()
-    email = data.get('email')
-    password = data.get('password')
-
-    user_data = db.users.find_one({'email': email})
-    if user_data and check_password_hash(user_data['password'], password):
-        token = generate_token(str(user_data['_id']))
-        return jsonify({'message': 'Logged in successfully', 'role': user_data['role'], 'token': token, 'user': {'email': user_data['email'], 'name': user_data['name'], 'role': user_data['role']}}), 200
-    return jsonify({'error': 'Invalid credentials'}), 401
-
-@app.route('/logout', methods=['POST'])
-def logout():
-    return jsonify({'message': 'Logged out successfully'}), 200
-
-@app.route('/classes', methods=['POST'])
-def create_class():
-    current_user = get_current_user()
-    if not current_user or current_user['role'] != 'teacher':
-        return jsonify({'error': 'Only teachers can create classes'}), 403
-
-    data = request.get_json()
-    class_name = data.get('class_name')
-    class_password = data.get('class_password')
-    start_time = data.get('start_time')
-    end_time = data.get('end_time')
-
-    if not all([class_name, class_password]):
-        return jsonify({'error': 'Class name and password are required'}), 400
-
-    # Hash the class password
-    hashed_class_password = generate_password_hash(class_password, method='pbkdf2:sha256')
-
-    class_doc = {
-        'teacher_email': current_user['email'],
-        'teacher_name': current_user['name'],
-        'class_name': class_name,
-        'class_password': hashed_class_password,
-        'enrolled_students': [],
-        'start_time': start_time,
-        'end_time': end_time,
-        'meeting_url': None,
-        'status': 'inactive',
-        'created_at': datetime.now(timezone.utc).isoformat()
-    }
-
-    result = db.classes.insert_one(class_doc)
-    return jsonify({
-        'message': 'Class created successfully',
-        'class_id': str(result.inserted_id)
-    }), 201
-
-@app.route('/classes', methods=['GET'])
-def get_classes():
-    current_user = get_current_user()
-    if not current_user:
-        return jsonify({'error': 'Unauthorized'}), 401
-
-    now = pd.Timestamp.now(tz='Asia/Kolkata')
-
-    if current_user['role'] == 'teacher':
-        classes = list(db.classes.find({'teacher_email': current_user['email']}))
-    elif current_user['role'] == 'student':
-        classes = list(db.classes.find({'enrolled_students': current_user['email']}))
-    else:  # admin
-        classes = list(db.classes.find({}))
-
-    for cls in classes:
-        if cls['start_time'] and cls['end_time']:
-            start = pd.to_datetime(cls['start_time'], utc=True).tz_convert('Asia/Kolkata')
-            end = pd.to_datetime(cls['end_time'], utc=True).tz_convert('Asia/Kolkata')
-            if cls['status'] != 'completed':
-                if start <= now <= end:
-                    cls['status'] = 'active'
-                    db.classes.update_one({'_id': cls['_id']}, {'$set': {'status': 'active'}})
-                elif now > end:
-                    cls['status'] = 'inactive'
-                    db.classes.update_one({'_id': cls['_id']}, {'$set': {'status': 'inactive'}})
-        cls['_id'] = str(cls['_id'])
-        cls.pop('class_password', None)  # Don't send password hash to frontend
-
-    return jsonify(classes), 200
-
-@app.route('/classes/available', methods=['GET'])
-def get_available_classes():
-    """Get all classes available for student to join (not yet enrolled)"""
-    current_user = get_current_user()
-    if not current_user or current_user['role'] != 'student':
-        return jsonify({'error': 'Only students can view available classes'}), 403
-
-    # Get all classes where student is not enrolled
-    available_classes = list(db.classes.find({
-        'enrolled_students': {'$ne': current_user['email']},
-        'status': {'$ne': 'completed'}
-    }))
-
-    for cls in available_classes:
-        cls['_id'] = str(cls['_id'])
-        cls.pop('class_password', None)  # Don't send password hash
-        cls['student_count'] = len(cls.get('enrolled_students', []))
-
-    return jsonify(available_classes), 200
-
-@app.route('/classes/<class_id>/join', methods=['POST'])
-def join_class(class_id):
-    """Student joins a class with password"""
-    current_user = get_current_user()
-    if not current_user or current_user['role'] != 'student':
-        return jsonify({'error': 'Only students can join classes'}), 403
-
-    data = request.get_json()
-    password = data.get('password')
-
-    if not password:
-        return jsonify({'error': 'Password required'}), 400
-
-    cls = db.classes.find_one({'_id': ObjectId(class_id)})
-    if not cls:
-        return jsonify({'error': 'Class not found'}), 404
-
-    if check_password_hash(cls['class_password'], password):
-        # Add student to enrolled_students if not already there
-        if current_user['email'] not in cls.get('enrolled_students', []):
-            db.classes.update_one(
-                {'_id': ObjectId(class_id)},
-                {'$push': {'enrolled_students': current_user['email']}}
-            )
-        return jsonify({'message': 'Joined class successfully'}), 200
-    else:
-        return jsonify({'error': 'Invalid password'}), 401
-
-@app.route('/classes/<class_id>/meeting-link', methods=['POST'])
-def post_meeting_link(class_id):
-    """Teacher posts meeting link for a class"""
-    current_user = get_current_user()
-    if not current_user or current_user['role'] != 'teacher':
-        return jsonify({'error': 'Only teachers can post meeting links'}), 403
-
-    data = request.get_json()
-    meeting_url = data.get('meeting_url')
-
-    if not meeting_url:
-        return jsonify({'error': 'Meeting URL required'}), 400
-
-    result = db.classes.update_one(
-        {'_id': ObjectId(class_id), 'teacher_email': current_user['email']},
-        {'$set': {'meeting_url': meeting_url}}
-    )
-
-    if result.matched_count == 0:
-        return jsonify({'error': 'Class not found or unauthorized'}), 404
-
-    return jsonify({'message': 'Meeting link posted successfully'}), 200
-
-@app.route('/classes/<class_id>/start', methods=['POST'])
-def start_class(class_id):
-    """Teacher starts the class immediately"""
-    current_user = get_current_user()
-    if not current_user or current_user['role'] != 'teacher':
-        return jsonify({'error': 'Only teachers can start classes'}), 403
-
-    result = db.classes.update_one(
-        {'_id': ObjectId(class_id), 'teacher_email': current_user['email']},
-        {'$set': {'status': 'active', 'started_at': datetime.now(timezone.utc).isoformat()}}
-    )
-
-    if result.matched_count == 0:
-        return jsonify({'error': 'Class not found or unauthorized'}), 404
-
-    return jsonify({'message': 'Class started successfully'}), 200
-
-@app.route('/classes/<class_id>/low-attention-alerts', methods=['GET'])
-def get_low_attention_alerts(class_id):
-    """Get students with attention < 30%"""
-    current_user = get_current_user()
-    if not current_user or current_user['role'] != 'teacher':
-        return jsonify({'error': 'Only teachers can view alerts'}), 403
-
-    cls = db.classes.find_one({'_id': ObjectId(class_id), 'teacher_email': current_user['email']})
-    if not cls:
-        return jsonify({'error': 'Class not found'}), 404
-
-    enrolled_students = cls.get('enrolled_students', [])
-    low_attention_students = []
-
-    # Get recent frames (last 5 minutes) for each student
-    recent_time = datetime.now(timezone.utc).timestamp() - 300
-
-    for student_email in enrolled_students:
-        student_user = db.users.find_one({'email': student_email})
-        student_name = student_user['name'] if student_user else student_email
-
-        # Get average focus for this student in the last 5 minutes
-        pipeline = [
-            {'$match': {
-                'student_email': student_email,
-                'class_id': class_id,
-                'timestamp': {'$gte': datetime.fromtimestamp(recent_time, tz=timezone.utc).isoformat()}
-            }},
-            {'$group': {
-                '_id': None,
-                'avg_attention': {'$avg': '$focus_score'},
-                'count': {'$sum': 1}
-            }}
-        ]
-
-        result = list(db.frames.aggregate(pipeline))
-        if result:
-            avg_attention = result[0].get('avg_attention', 0)
-            if avg_attention < 30:
-                low_attention_students.append({
-                    'student_email': student_email,
-                    'student_name': student_name,
-                    'avg_attention': round(avg_attention, 2),
-                    'alert': '🔴 LOW ATTENTION'
-                })
-
-    return jsonify({'alerts': low_attention_students}), 200
-
-@app.route('/classes/<class_id>/status', methods=['GET'])
-def check_class_status(class_id):
-    """Get the current status of a class"""
-    cls = db.classes.find_one({'_id': ObjectId(class_id)})
-    if not cls:
-        return jsonify({'error': 'Class not found'}), 404
-    
-    return jsonify({'status': cls.get('status', 'inactive')}), 200
-
-@app.route('/classes/<class_id>/check-started', methods=['GET'])
-def check_class_started(class_id):
-    """Check if class has been started by teacher"""
-    cls = db.classes.find_one({'_id': ObjectId(class_id)})
-    if not cls:
-        return jsonify({'error': 'Class not found'}), 404
-    
-    started = cls.get('status') == 'active'
-    meeting_url = cls.get('meeting_url', '')
-    return jsonify({
-        'started': started,
-        'status': cls.get('status', 'inactive'),
-        'meeting_url': meeting_url,
-        'class_name': cls.get('class_name', '')
-    }), 200
-
-@app.route('/classes/<class_id>/status', methods=['POST'])
-def set_class_status(class_id):
-    current_user = get_current_user()
-    if not current_user or current_user['role'] != 'teacher':
-        return jsonify({'error': 'Only teachers can change class status'}), 403
-
-    data = request.get_json()
-    status = data.get('status')  # 'active', 'inactive', 'completed'
-
-    if status not in ['active', 'inactive', 'completed']:
-        return jsonify({'error': 'Invalid status'}), 400
-
-    if status == 'active':
-        # Deactivate all other active classes for this teacher
-        db.classes.update_many({'teacher_email': current_user['email'], 'status': 'active'}, {'$set': {'status': 'inactive'}})
-
-    db.classes.update_one({'_id': ObjectId(class_id), 'teacher_email': current_user['email']}, {'$set': {'status': status}})
-    return jsonify({'message': 'Class status updated'}), 200
-
-@app.route('/frame', methods=['POST'])
-def add_frame():
-    current_user = get_current_user()
-    if not current_user or current_user['role'] != 'student':
-        return jsonify({'error': 'Only students can send frame data'}), 403
-
-    ist = pytz.timezone('Asia/Kolkata')
-
-    data = request.get_json()
-    class_id = data.get('class_id')
-    timestamp = data.get('timestamp', datetime.now(ist).isoformat())
-    gaze = data.get('gaze')
-    head_direction = data.get('head_direction')
-    yawning = data.get('yawning', False)
-    mouth_distance = data.get('mouth_distance', 0.0)
-    laughing = data.get('laughing', False)
-    mouth_width = data.get('mouth_width', 0.0)
-    mouth_height = data.get('mouth_height', 0.0)
-    focus_score = data.get('focus_score', 0.0)
-
-    frame_doc = {
-        'timestamp': timestamp,
-        'student_email': current_user['email'],
-        'class_id': class_id,
-        'gaze': gaze,
-        'head_direction': head_direction,
-        'yawning': yawning,
-        'mouth_distance': mouth_distance,
-        'laughing': laughing,
-        'mouth_width': mouth_width,
-        'mouth_height': mouth_height,
-        'focus_score': focus_score
-    }
-
-    db.frames.insert_one(frame_doc)
-
-    # Check if focus score is low and send alert
-    if focus_score < 50:  # threshold
-        send_alert(current_user['email'], class_id, focus_score)
-
-    return jsonify({'status': 'ok'}), 201
-
-def send_alert(student_email, class_id, focus_score):
-    msg = Message('Focus Alert', sender=app.config['MAIL_USERNAME'], recipients=[student_email])
-    msg.body = f'Your focus score is low ({focus_score}%). Please pay attention!'
-    mail.send(msg)
-
+# ================= AUTH =================
 def get_current_user():
     token = request.headers.get('Authorization')
     if token:
         user_id = verify_token(token)
         if user_id:
-            user_data = db.users.find_one({'_id': ObjectId(user_id)})
-            if user_data:
-                return user_data  # return dict
+            return db.users.find_one({'_id': ObjectId(user_id)})
     return None
 
-@app.route('/history/<class_id>', methods=['GET'])
-def get_history(class_id):
-    current_user = get_current_user()
-    if not current_user:
+# ================= REGISTER =================
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.get_json()
+
+    email = data.get('email')
+    password = data.get('password')
+    role = data.get('role')
+    name = data.get('name')
+    class_name = data.get('class_name') if role == 'student' else None
+    student_id = data.get('student_id') if role == 'student' else None
+    secret_code = data.get('secret_code')
+
+    if not all([email, password, role, name]):
+        return jsonify({'error': 'Missing fields'}), 400
+
+    if role in ['teacher', 'admin']:
+        expected_code = app.config['TEACHER_REG_CODE'] if role == 'teacher' else app.config['ADMIN_REG_CODE']
+        if secret_code != expected_code:
+            return jsonify({'error': 'Invalid registration secret for role'}), 403
+
+    if db.users.find_one({'email': email}):
+        return jsonify({'error': 'User exists'}), 400
+
+    db.users.insert_one({
+        'email': email,
+        'password': generate_password_hash(password),
+        'role': role,
+        'name': name,
+        'class_name': class_name,
+        'student_id': student_id
+    })
+
+    return jsonify({'message': 'Registered'}), 201
+
+# ================= LOGIN =================
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.get_json()
+
+    user = db.users.find_one({'email': data.get('email')})
+    if user and check_password_hash(user['password'], data.get('password')):
+        token = generate_token(str(user['_id']))
+        return jsonify({
+            'token': token,
+            'user': {
+                'email': user['email'],
+                'name': user['name'],
+                'role': user['role'],
+                'student_id': user.get('student_id')
+            }
+        }), 200
+
+    return jsonify({'error': 'Invalid credentials'}), 401
+
+# ================= CREATE CLASS =================
+@app.route('/classes', methods=['POST'])
+def create_class():
+    user = get_current_user()
+    if not user or user['role'] != 'teacher':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    data = request.get_json()
+
+    start = datetime.fromisoformat(data['start_time'])
+    end = datetime.fromisoformat(data['end_time'])
+
+    if start.tzinfo is None:
+        start = ist.localize(start)
+    if end.tzinfo is None:
+        end = ist.localize(end)
+
+    now = datetime.now(ist)
+
+    if now < start:
+        status = 'upcoming'
+    elif start <= now <= end:
+        status = 'active'
+    else:
+        status = 'completed'
+
+    db.classes.insert_one({
+        'teacher_email': user['email'],
+        'class_name': data['class_name'],
+        'student_emails': data.get('student_emails', []),
+        'student_alerts': {},
+        'student_status': {},
+        'start_time': start.isoformat(),
+        'end_time': end.isoformat(),
+        'meeting_url': data['meeting_url'],
+        'status': status
+    })
+
+    return jsonify({'message': 'Class created', 'status': status}), 201
+
+# ================= GET CLASSES =================
+@app.route('/classes', methods=['GET'])
+def get_classes():
+    user = get_current_user()
+    if not user:
         return jsonify({'error': 'Unauthorized'}), 401
 
-    limit = int(request.args.get('limit', 240))
+    now = datetime.now(ist)
 
-    if current_user['role'] == 'student':
-        frames = list(db.frames.find({'student_email': current_user['email'], 'class_id': class_id}).sort('_id', -1).limit(limit))
-    elif current_user['role'] == 'teacher':
-        # Get frames for all students in the class
-        cls = db.classes.find_one({'_id': ObjectId(class_id), 'teacher_email': current_user['email']})
-        if not cls:
-            return jsonify({'error': 'Class not found'}), 404
-        enrolled_students = cls.get('enrolled_students', [])
-        frames = list(db.frames.find({'student_email': {'$in': enrolled_students}, 'class_id': class_id}).sort('_id', -1).limit(limit))
-    else:  # admin
-        frames = list(db.frames.find({'class_id': class_id}).sort('_id', -1).limit(limit))
+    query = {}
+    if user['role'] == 'teacher':
+        query['teacher_email'] = user['email']
+    elif user['role'] == 'student':
+        query['student_emails'] = user['email']
 
-    for frame in frames:
-        frame['_id'] = str(frame['_id'])
+    classes = list(db.classes.find(query))
 
-    return jsonify({'history': frames}), 200
+    for cls in classes:
+        start = datetime.fromisoformat(cls['start_time'])
+        end = datetime.fromisoformat(cls['end_time'])
 
-@app.route('/stats/<class_id>', methods=['GET'])
-def get_stats(class_id):
-    current_user = get_current_user()
-    if not current_user:
+        if cls['status'] != 'completed':
+            if now < start:
+                new_status = 'upcoming'
+            elif start <= now <= end:
+                new_status = 'active'
+            else:
+                new_status = 'completed'
+
+            if new_status != cls['status']:
+                db.classes.update_one({'_id': cls['_id']}, {'$set': {'status': new_status}})
+                cls['status'] = new_status
+
+        cls['_id'] = str(cls['_id'])
+
+    return jsonify(classes), 200
+
+# ================= AVAILABLE CLASSES =================
+@app.route('/classes/available', methods=['GET'])
+def get_available_classes():
+    user = get_current_user()
+    if not user or user['role'] != 'student':
         return jsonify({'error': 'Unauthorized'}), 401
 
-    if current_user['role'] == 'student':
-        pipeline = [
-            {'$match': {'student_email': current_user['email'], 'class_id': class_id}},
-            {'$group': {'_id': None, 'count': {'$sum': 1}, 'average_score': {'$avg': '$focus_score'}}}
-        ]
-    elif current_user['role'] == 'teacher':
-        cls = db.classes.find_one({'_id': ObjectId(class_id), 'teacher_email': current_user['email']})
-        if not cls:
-            return jsonify({'error': 'Class not found'}), 404
-        enrolled_students = cls.get('enrolled_students', [])
-        pipeline = [
-            {'$match': {'student_email': {'$in': enrolled_students}, 'class_id': class_id}},
-            {'$group': {'_id': None, 'count': {'$sum': 1}, 'average_score': {'$avg': '$focus_score'}}}
-        ]
-    else:  # admin
-        pipeline = [
-            {'$match': {'class_id': class_id}},
-            {'$group': {'_id': None, 'count': {'$sum': 1}, 'average_score': {'$avg': '$focus_score'}}}
-        ]
+    now = datetime.now(ist)
+    classes = list(db.classes.find({
+        'student_emails': {'$ne': user['email']},
+        'status': {'$ne': 'completed'}
+    }))
 
-    result = list(db.frames.aggregate(pipeline))
-    if result:
-        stats = result[0]
-        stats.pop('_id')
-    else:
-        stats = {'count': 0, 'average_score': 0.0}
+    for cls in classes:
+        start = datetime.fromisoformat(cls['start_time'])
+        end = datetime.fromisoformat(cls['end_time'])
 
-    # Get latest frame
-    latest = db.frames.find_one({'class_id': class_id}, sort=[('_id', -1)])
-    if latest:
-        latest['_id'] = str(latest['_id'])
-        stats['latest'] = latest
-    else:
-        stats['latest'] = None
+        if cls['status'] != 'completed':
+            if now < start:
+                new_status = 'upcoming'
+            elif start <= now <= end:
+                new_status = 'active'
+            else:
+                new_status = 'completed'
 
-    return jsonify(stats), 200
+            if new_status != cls['status']:
+                db.classes.update_one({'_id': cls['_id']}, {'$set': {'status': new_status}})
+                cls['status'] = new_status
 
-@app.route('/classes/<class_id>/attendance', methods=['GET'])
-def get_attendance(class_id):
-    """Get attendance and average attention for each student in a class (teacher only)"""
-    current_user = get_current_user()
-    if not current_user or current_user['role'] != 'teacher':
-        return jsonify({'error': 'Only teachers can view attendance'}), 403
+        cls['_id'] = str(cls['_id'])
 
-    cls = db.classes.find_one({'_id': ObjectId(class_id), 'teacher_email': current_user['email']})
+    return jsonify(classes), 200
+
+# ================= JOIN CLASS =================
+@app.route('/classes/<class_id>/join', methods=['POST'])
+def join_class(class_id):
+    user = get_current_user()
+    if not user or user['role'] != 'student':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    cls = db.classes.find_one({'_id': ObjectId(class_id)})
     if not cls:
         return jsonify({'error': 'Class not found'}), 404
 
-    enrolled_students = cls.get('enrolled_students', [])
-    attendance_report = []
+    if user['email'] not in cls.get('student_emails', []):
+        db.classes.update_one(
+            {'_id': ObjectId(class_id)},
+            {
+                '$addToSet': {'student_emails': user['email']},
+                '$set': {f'student_status.{user["email"]}': {'low_focus_count': 0, 'last_frame': None}}
+            }
+        )
 
-    for student_email in enrolled_students:
-        # Get student name from users collection
+    return jsonify({'message': 'Joined class successfully'}), 200
+
+# ================= FRAME =================
+@app.route('/frame', methods=['POST'])
+def add_frame():
+    user = get_current_user()
+    if not user or user['role'] != 'student':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    data = request.get_json()
+    class_id = data.get('class_id')
+    if not class_id:
+        return jsonify({'error': 'Class ID is required'}), 400
+
+    class_doc = db.classes.find_one({'_id': ObjectId(class_id)})
+    if not class_doc:
+        return jsonify({'error': 'Class not found'}), 404
+
+    if user['email'] not in class_doc.get('student_emails', []):
+        return jsonify({'error': 'You must join the class before sending frames'}), 403
+
+    now = datetime.now(ist)
+    frame = {
+        'timestamp': now.isoformat(),
+        'student_email': user['email'],
+        'student_id': user.get('student_id'),
+        'class_id': class_id,
+        'focus_score': data.get('focus_score', 0),
+        'face_detected': data.get('face_detected', True)
+    }
+
+    db.frames.insert_one(frame)
+
+    student_status = class_doc.get('student_status', {})
+    student_record = student_status.get(user['email'], {'low_focus_count': 0, 'last_frame': None})
+
+    if student_record.get('last_frame'):
+        last_time = datetime.fromisoformat(student_record['last_frame'])
+        gap = now - last_time
+    else:
+        gap = None
+
+    # Inactivity alert for teacher when a student returns after a long pause
+    inactivity_threshold = timedelta(minutes=10)
+    teacher_email = class_doc.get('teacher_email')
+    if gap and gap > inactivity_threshold and class_doc.get('status') == 'active' and teacher_email:
+        send_alert(teacher_email, f"Student {user.get('student_id') or user['email']} was inactive for {int(gap.total_seconds() / 60)} minutes in {class_doc['class_name']}.")
+
+    if frame['focus_score'] < 4:
+        student_record['low_focus_count'] = student_record.get('low_focus_count', 0) + 1
+        if student_record['low_focus_count'] == 2:
+            send_alert(user['email'], f"Low focus alert: your focus score is low in class {class_doc['class_name']}. Please pay attention.")
+        elif student_record['low_focus_count'] >= 3 and teacher_email:
+            send_alert(teacher_email, f"Student {user.get('student_id') or user['email']} has been low focus repeatedly in {class_doc['class_name']}.")
+    else:
+        student_record['low_focus_count'] = 0
+
+    student_record['last_frame'] = now.isoformat()
+    student_status[user['email']] = student_record
+    db.classes.update_one({'_id': class_doc['_id']}, {'$set': {'student_status': student_status}})
+
+    if not frame['face_detected']:
+        send_alert(user['email'], 'Face not detected. Please adjust your camera.')
+
+    return jsonify({'status': 'ok'}), 201
+
+# ================= ALERT =================
+def send_alert(email, message):
+    try:
+        msg = Message(
+            'Alert',
+            sender=app.config['MAIL_USERNAME'],
+            recipients=[email]
+        )
+        msg.body = message
+        mail.send(msg)
+    except Exception as e:
+        print("Mail error:", e)
+
+# ================= HISTORY =================
+@app.route('/history/<class_id>', methods=['GET'])
+def get_history(class_id):
+    frames = list(db.frames.find({'class_id': class_id}).sort('_id', -1).limit(200))
+
+    for f in frames:
+        f['_id'] = str(f['_id'])
+
+    return jsonify({'history': frames}), 200
+
+# ================= STATS =================
+@app.route('/attendance/<class_id>', methods=['GET'])
+def get_attendance(class_id):
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    cls = db.classes.find_one({'_id': ObjectId(class_id)})
+    if not cls:
+        return jsonify({'error': 'Class not found'}), 404
+
+    if user['role'] == 'teacher' and cls.get('teacher_email') != user['email']:
+        return jsonify({'error': 'Unauthorized'}), 403
+    if user['role'] == 'student' and user['email'] not in cls.get('student_emails', []):
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    attendance = []
+    for student_email in cls.get('student_emails', []):
         student_user = db.users.find_one({'email': student_email})
         student_name = student_user['name'] if student_user else student_email
+        student_id = student_user.get('student_id') if student_user else None
+        frames = list(db.frames.find({'class_id': class_id, 'student_email': student_email}))
+        avg_focus = round(sum(f.get('focus_score', 0) for f in frames) / len(frames), 1) if frames else 0
+        attended = len(frames) > 0
+        last_seen = frames[-1]['timestamp'] if frames else None
+        inactive = False
+        if last_seen:
+            last_time = datetime.fromisoformat(last_seen)
+            inactive = (datetime.now(ist) - last_time) > timedelta(minutes=10)
+        attendance.append({
+            'student_name': student_name,
+            'student_email': student_email,
+            'student_id': student_id,
+            'attended': attended,
+            'avg_attention': avg_focus,
+            'frames_sent': len(frames),
+            'last_seen': last_seen,
+            'inactive': inactive
+        })
 
-        # Aggregate data for this student
-        pipeline = [
-            {'$match': {'student_email': student_email, 'class_id': class_id}},
-            {'$group': {
-                '_id': None,
-                'frames_sent': {'$sum': 1},
-                'avg_attention': {'$avg': '$focus_score'},
-                'last_active': {'$max': '$timestamp'}
-            }}
-        ]
+    return jsonify(attendance), 200
 
-        result = list(db.frames.aggregate(pipeline))
-        if result:
-            data = result[0]
-            attendance_report.append({
-                'student_email': student_email,
-                'student_name': student_name,
-                'frames_sent': data.get('frames_sent', 0),
-                'avg_attention': round(data.get('avg_attention', 0), 2),
-                'last_active': data.get('last_active'),
-                'attended': data.get('frames_sent', 0) > 0
-            })
-        else:
-            attendance_report.append({
-                'student_email': student_email,
-                'student_name': student_name,
-                'frames_sent': 0,
-                'avg_attention': 0.0,
-                'last_active': None,
-                'attended': False
-            })
+@app.route('/stats/<class_id>', methods=['GET'])
+def get_stats(class_id):
+    result = list(db.frames.aggregate([
+        {'$match': {'class_id': class_id}},
+        {'$group': {'_id': None, 'avg': {'$avg': '$focus_score'}, 'count': {'$sum': 1}}}
+    ]))
 
-    return jsonify({'attendance': attendance_report}), 200
+    if result:
+        data = result[0]
+        return jsonify({'average': data['avg'], 'count': data['count']}), 200
 
-@app.route('/classes/categorized', methods=['GET'])
-def get_categorized_classes():
-    """Get classes categorized as active, attended, and future for current user"""
-    current_user = get_current_user()
-    if not current_user:
-        return jsonify({'error': 'Unauthorized'}), 401
+    return jsonify({'average': 0, 'count': 0}), 200
 
-    now = pd.Timestamp.now(tz='Asia/Kolkata')
+# ================= ADMIN =================
+@app.route('/admin/summary', methods=['GET'])
+def get_admin_summary():
+    user = get_current_user()
+    if not user or user.get('role') != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 403
 
-    # Get user's classes
-    if current_user['role'] == 'teacher':
-        all_classes = list(db.classes.find({'teacher_email': current_user['email']}))
-    elif current_user['role'] == 'student':
-        all_classes = list(db.classes.find({'enrolled_students': current_user['email']}))
-    else:
-        all_classes = list(db.classes.find({}))
+    summary = {
+        'total_users': db.users.count_documents({}),
+        'students': db.users.count_documents({'role': 'student'}),
+        'teachers': db.users.count_documents({'role': 'teacher'}),
+        'classes': db.classes.count_documents({}),
+        'active_classes': db.classes.count_documents({'status': 'active'}),
+        'upcoming_classes': db.classes.count_documents({'status': 'upcoming'}),
+        'completed_classes': db.classes.count_documents({'status': 'completed'})
+    }
 
-    active = []
-    attended = []
-    future = []
+    return jsonify(summary), 200
 
-    for cls in all_classes:
-        cls['_id'] = str(cls['_id'])
-        cls.pop('class_password', None)
-
-        # Check database status field first (user-set status takes priority)
-        db_status = cls.get('status', 'inactive')
-        
-        start = pd.to_datetime(cls['start_time'], utc=True).tz_convert('Asia/Kolkata') if cls.get('start_time') else None
-        end = pd.to_datetime(cls['end_time'], utc=True).tz_convert('Asia/Kolkata') if cls.get('end_time') else None
-
-        # Determine category based on database status and time
-        if db_status == 'active':
-            # Manually started - show as active regardless of time
-            active.append(cls)
-        elif db_status == 'completed':
-            # Manually ended - show as completed
-            attended.append(cls)
-        elif start and end:
-            if start <= now <= end:
-                # Time-based active class
-                active.append(cls)
-            elif now > end:
-                # Time-based completed
-                attended.append(cls)
-            else:
-                # Scheduled for future
-                future.append(cls)
-        else:
-            future.append(cls)
-
-    return jsonify({
-        'active': active,
-        'attended': attended,
-        'future': future
-    }), 200
-
-@app.route('/active_students/<class_id>', methods=['GET'])
-def get_active_students(class_id):
-    current_user = get_current_user()
-    if not current_user:
-        return jsonify({'error': 'Unauthorized'}), 401
-
-    # Get students who have sent frames recently (e.g., last 5 minutes)
-    recent_time = datetime.now(timezone.utc).timestamp() - 300  # 5 minutes ago
-    recent_frames = db.frames.find({'class_id': class_id, 'timestamp': {'$gte': datetime.fromtimestamp(recent_time, tz=timezone.utc).isoformat()}})
-    active_emails = set(frame['student_email'] for frame in recent_frames)
-    active_count = len(active_emails)
-    return jsonify({'active_students': active_count, 'emails': list(active_emails)}), 200
-
+# ================= RUN =================
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(debug=True)

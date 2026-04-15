@@ -22,4 +22,4 @@ def compute_focus_score(gaze, head_direction, yawn, laugh):
     score = (0.4 * eye_contact) + (0.3 * head_attention) + (0.2 * expression_score) + 0.1
     score = max(0, min(1, score))
 
-    return round(score * 100, 1)
+    return round(score * 10, 1)
