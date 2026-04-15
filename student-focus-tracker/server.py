@@ -10,7 +10,7 @@ import jwt
 import pandas as pd
 import pytz
 app = Flask(__name__)
-app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'jwt-secret-key')
+app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'your-32-character-jwt-secret-key-here')
 
 def generate_token(user_id):
     payload = {
@@ -197,7 +197,7 @@ def join_class(class_id):
 
     if check_password_hash(cls['class_password'], password):
         # Add student to enrolled_students if not already there
-        if current_user['email'] not in cls['enrolled_students']:
+        if current_user['email'] not in cls.get('enrolled_students', []):
             db.classes.update_one(
                 {'_id': ObjectId(class_id)},
                 {'$push': {'enrolled_students': current_user['email']}}
@@ -257,7 +257,7 @@ def get_low_attention_alerts(class_id):
     if not cls:
         return jsonify({'error': 'Class not found'}), 404
 
-    enrolled_students = cls['enrolled_students']
+    enrolled_students = cls.get('enrolled_students', [])
     low_attention_students = []
 
     # Get recent frames (last 5 minutes) for each student
@@ -410,7 +410,7 @@ def get_history(class_id):
         cls = db.classes.find_one({'_id': ObjectId(class_id), 'teacher_email': current_user['email']})
         if not cls:
             return jsonify({'error': 'Class not found'}), 404
-        enrolled_students = cls['enrolled_students']
+        enrolled_students = cls.get('enrolled_students', [])
         frames = list(db.frames.find({'student_email': {'$in': enrolled_students}, 'class_id': class_id}).sort('_id', -1).limit(limit))
     else:  # admin
         frames = list(db.frames.find({'class_id': class_id}).sort('_id', -1).limit(limit))
@@ -435,7 +435,7 @@ def get_stats(class_id):
         cls = db.classes.find_one({'_id': ObjectId(class_id), 'teacher_email': current_user['email']})
         if not cls:
             return jsonify({'error': 'Class not found'}), 404
-        enrolled_students = cls['enrolled_students']
+        enrolled_students = cls.get('enrolled_students', [])
         pipeline = [
             {'$match': {'student_email': {'$in': enrolled_students}, 'class_id': class_id}},
             {'$group': {'_id': None, 'count': {'$sum': 1}, 'average_score': {'$avg': '$focus_score'}}}
@@ -474,7 +474,7 @@ def get_attendance(class_id):
     if not cls:
         return jsonify({'error': 'Class not found'}), 404
 
-    enrolled_students = cls['enrolled_students']
+    enrolled_students = cls.get('enrolled_students', [])
     attendance_report = []
 
     for student_email in enrolled_students:

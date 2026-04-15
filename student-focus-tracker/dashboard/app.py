@@ -141,8 +141,6 @@ def student_dashboard():
                                 if result and 'message' in result:
                                     st.success("✅ Joined class successfully!")
                                     st.info(f"Starting focus tracker for class {cls['_id']}...")
-                                    import subprocess
-                                    import sys
                                     # Launch main.py in headless mode (background)
                                     subprocess.Popen([
                                         sys.executable, 
