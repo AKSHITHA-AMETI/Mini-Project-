@@ -229,6 +229,96 @@ def post_meeting_link(class_id):
 
     return jsonify({'message': 'Meeting link posted successfully'}), 200
 
+@app.route('/classes/<class_id>/start', methods=['POST'])
+def start_class(class_id):
+    """Teacher starts the class immediately"""
+    current_user = get_current_user()
+    if not current_user or current_user['role'] != 'teacher':
+        return jsonify({'error': 'Only teachers can start classes'}), 403
+
+    result = db.classes.update_one(
+        {'_id': ObjectId(class_id), 'teacher_email': current_user['email']},
+        {'$set': {'status': 'active', 'started_at': datetime.now(timezone.utc).isoformat()}}
+    )
+
+    if result.matched_count == 0:
+        return jsonify({'error': 'Class not found or unauthorized'}), 404
+
+    return jsonify({'message': 'Class started successfully'}), 200
+
+@app.route('/classes/<class_id>/low-attention-alerts', methods=['GET'])
+def get_low_attention_alerts(class_id):
+    """Get students with attention < 30%"""
+    current_user = get_current_user()
+    if not current_user or current_user['role'] != 'teacher':
+        return jsonify({'error': 'Only teachers can view alerts'}), 403
+
+    cls = db.classes.find_one({'_id': ObjectId(class_id), 'teacher_email': current_user['email']})
+    if not cls:
+        return jsonify({'error': 'Class not found'}), 404
+
+    enrolled_students = cls['enrolled_students']
+    low_attention_students = []
+
+    # Get recent frames (last 5 minutes) for each student
+    recent_time = datetime.now(timezone.utc).timestamp() - 300
+
+    for student_email in enrolled_students:
+        student_user = db.users.find_one({'email': student_email})
+        student_name = student_user['name'] if student_user else student_email
+
+        # Get average focus for this student in the last 5 minutes
+        pipeline = [
+            {'$match': {
+                'student_email': student_email,
+                'class_id': class_id,
+                'timestamp': {'$gte': datetime.fromtimestamp(recent_time, tz=timezone.utc).isoformat()}
+            }},
+            {'$group': {
+                '_id': None,
+                'avg_attention': {'$avg': '$focus_score'},
+                'count': {'$sum': 1}
+            }}
+        ]
+
+        result = list(db.frames.aggregate(pipeline))
+        if result:
+            avg_attention = result[0].get('avg_attention', 0)
+            if avg_attention < 30:
+                low_attention_students.append({
+                    'student_email': student_email,
+                    'student_name': student_name,
+                    'avg_attention': round(avg_attention, 2),
+                    'alert': '🔴 LOW ATTENTION'
+                })
+
+    return jsonify({'alerts': low_attention_students}), 200
+
+@app.route('/classes/<class_id>/status', methods=['GET'])
+def check_class_status(class_id):
+    """Get the current status of a class"""
+    cls = db.classes.find_one({'_id': ObjectId(class_id)})
+    if not cls:
+        return jsonify({'error': 'Class not found'}), 404
+    
+    return jsonify({'status': cls.get('status', 'inactive')}), 200
+
+@app.route('/classes/<class_id>/check-started', methods=['GET'])
+def check_class_started(class_id):
+    """Check if class has been started by teacher"""
+    cls = db.classes.find_one({'_id': ObjectId(class_id)})
+    if not cls:
+        return jsonify({'error': 'Class not found'}), 404
+    
+    started = cls.get('status') == 'active'
+    meeting_url = cls.get('meeting_url', '')
+    return jsonify({
+        'started': started,
+        'status': cls.get('status', 'inactive'),
+        'meeting_url': meeting_url,
+        'class_name': cls.get('class_name', '')
+    }), 200
+
 @app.route('/classes/<class_id>/status', methods=['POST'])
 def set_class_status(class_id):
     current_user = get_current_user()
@@ -451,18 +541,28 @@ def get_categorized_classes():
         cls['_id'] = str(cls['_id'])
         cls.pop('class_password', None)
 
+        # Check database status field first (user-set status takes priority)
+        db_status = cls.get('status', 'inactive')
+        
         start = pd.to_datetime(cls['start_time'], utc=True).tz_convert('Asia/Kolkata') if cls.get('start_time') else None
         end = pd.to_datetime(cls['end_time'], utc=True).tz_convert('Asia/Kolkata') if cls.get('end_time') else None
 
-        if start and end:
+        # Determine category based on database status and time
+        if db_status == 'active':
+            # Manually started - show as active regardless of time
+            active.append(cls)
+        elif db_status == 'completed':
+            # Manually ended - show as completed
+            attended.append(cls)
+        elif start and end:
             if start <= now <= end:
-                cls['status'] = 'active'
+                # Time-based active class
                 active.append(cls)
             elif now > end:
-                cls['status'] = 'completed'
+                # Time-based completed
                 attended.append(cls)
             else:
-                cls['status'] = 'future'
+                # Scheduled for future
                 future.append(cls)
         else:
             future.append(cls)

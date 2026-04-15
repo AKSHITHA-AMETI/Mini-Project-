@@ -2,6 +2,9 @@ import streamlit as st
 import pandas as pd
 import requests
 import os
+import sys
+import subprocess
+import time
 import webbrowser
 from datetime import datetime
 
@@ -58,7 +61,7 @@ def fetch_available_classes():
     data = api_request('GET', '/classes/available')
     return data or []
 
-@st.cache_data(ttl=8)
+@st.cache_data(ttl=1)
 def fetch_categorized_classes():
     data = api_request('GET', '/classes/categorized')
     return data or {'active': [], 'attended': [], 'future': []}
@@ -137,6 +140,17 @@ def student_dashboard():
                                 result = api_request('POST', f'/classes/{cls["_id"]}/join', {'password': password})
                                 if result and 'message' in result:
                                     st.success("✅ Joined class successfully!")
+                                    st.info(f"Starting focus tracker for class {cls['_id']}...")
+                                    import subprocess
+                                    import sys
+                                    # Launch main.py in headless mode (background)
+                                    subprocess.Popen([
+                                        sys.executable, 
+                                        'main.py', 
+                                        cls["_id"],
+                                        st.session_state.get('token', ''),
+                                        '--headless'
+                                    ])
                                     st.cache_data.clear()
                                     st.rerun()
                                 else:
@@ -174,13 +188,28 @@ def student_dashboard():
         st.subheader("🎥 Active Classes - Start Tracking")
         categorized = fetch_categorized_classes()
         active_classes = categorized.get('active', [])
+    # Initialize tracking state in session
+    if 'active_trackers' not in st.session_state:
+        st.session_state.active_trackers = {}
+    if 'joined_classes' not in st.session_state:
+        st.session_state.joined_classes = set()
+    
+    with tab3:
+        col_title, col_refresh = st.columns([5, 1])
+        with col_title:
+            st.subheader("🎥 Active Classes")
+        with col_refresh:
+            if st.button("🔄 Refresh", key="refresh_student_active"):
+                st.cache_data.clear()
+                st.rerun()
         
         if active_classes:
             for cls in active_classes:
-                with st.expander(f"🔴 {cls['class_name']} - LIVE"):
+                with st.expander(f"🔴 {cls['class_name']} - LIVE", expanded=True):
                     col1, col2 = st.columns(2)
                     with col1:
                         st.write(f"**Teacher:** {cls.get('teacher_name', 'N/A')}")
+                        st.write(f"**Class ID:** {cls['_id'][:8]}...")
                         meeting_url = cls.get('meeting_url')
                         if meeting_url:
                             st.markdown(f"[🔗 Join Meeting]({meeting_url})")
@@ -189,10 +218,69 @@ def student_dashboard():
                         stats = fetch_stats(cls['_id'])
                         st.metric("Your Focus", f"{stats.get('average_score', 0.0):.1f}%")
                     
-                    if st.button("▶️ Start Focus Tracking", key=f"track_{cls['_id']}"):
-                        st.session_state['tracking_class_id'] = cls['_id']
-                        st.success("✅ Tracking started!")
-                        st.info("Please run `python main.py` in your terminal with this class ID.")
+                    class_id = cls['_id']
+                    token = st.session_state.get('token', '')
+                    user = st.session_state.get('user', {})
+                    student_email = user.get('email', '')
+                    
+                    # Check if student is enrolled in this class
+                    is_enrolled = student_email in cls.get('enrolled_students', [])
+                    is_tracking = class_id in st.session_state.active_trackers and \
+                                 st.session_state.active_trackers[class_id] is not None and \
+                                 st.session_state.active_trackers[class_id].poll() is None
+                    
+                    if not is_enrolled:
+                        # Show Join Class button
+                        st.info("ℹ️ You need to join this class to participate and start tracking.")
+                        if st.button("✅ Join Class", key=f"join_active_class_{class_id}"):
+                            # Call join endpoint (no password needed for active classes)
+                            result = api_request('POST', f'/classes/{class_id}/join', {
+                                'password': cls.get('class_password', '')
+                            })
+                            if result and 'message' in result:
+                                st.success("✅ Successfully joined the class!")
+                                st.session_state.joined_classes.add(class_id)
+                                st.cache_data.clear()
+                                st.rerun()
+                            else:
+                                st.error("❌ Failed to join class. Try again.")
+                    else:
+                        # Student is enrolled - show tracking controls
+                        if not is_tracking:
+                            # Auto-start tracking
+                            try:
+                                process = subprocess.Popen([
+                                    sys.executable,
+                                    'main.py',
+                                    class_id,
+                                    token,
+                                    '--headless'
+                                ])
+                                st.session_state.active_trackers[class_id] = process
+                                is_tracking = True
+                            except Exception as e:
+                                st.error(f"❌ Failed to auto-launch tracker: {e}")
+                        
+                        if is_tracking:
+                            st.success("✅ **🎥 Tracking Active!** - Your camera is being monitored and data is being stored.")
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                if st.button("⏹️ Stop Tracking", key=f"stop_track_{class_id}"):
+                                    try:
+                                        if class_id in st.session_state.active_trackers:
+                                            process = st.session_state.active_trackers[class_id]
+                                            if process and process.poll() is None:
+                                                process.terminate()
+                                                process.wait(timeout=2)
+                                            st.session_state.active_trackers[class_id] = None
+                                            st.info("⏹️ Tracking stopped.")
+                                            st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Error stopping tracker: {e}")
+                            with col2:
+                                st.caption("📹 Focus data is being captured and stored automatically")
+                        else:
+                            st.warning("⚠️ Tracking process has stopped")
         else:
             st.info("ℹ️ No active classes right now.")
 
@@ -238,10 +326,18 @@ def teacher_dashboard():
 
     # Tab 1: Active Classes
     with tab1:
-        st.subheader("🔴 Active Classes")
+        col_title, col_refresh = st.columns([5, 1])
+        with col_title:
+            st.subheader("🔴 Active Classes - Real-Time Dashboard")
+        with col_refresh:
+            if st.button("🔄 Refresh", key="refresh_active"):
+                st.cache_data.clear()
+                st.cache_resource.clear()
+                st.rerun()
+        
         if active_classes:
             for cls in active_classes:
-                with st.expander(f"🎥 {cls['class_name']} - NOW LIVE"):
+                with st.expander(f"🎥 {cls['class_name']} - NOW LIVE", expanded=True):
                     col1, col2, col3 = st.columns(3)
                     
                     with col1:
@@ -262,11 +358,15 @@ def teacher_dashboard():
                     
                     with col3:
                         if st.button("❌ End Class", key=f"stop_{cls['_id']}"):
-                            result = api_request('POST', f'/classes/{cls["_id"]}/status', {'status': 'completed'})
-                            if result:
+                            resp = api_request('POST', f'/classes/{cls["_id"]}/status', {'status': 'completed'})
+                            if resp and 'message' in resp:
                                 st.success("✅ Class ended!")
                                 st.cache_data.clear()
                                 st.rerun()
+                            else:
+                                st.error("❌ Failed to end class")
+
+                    st.divider()
 
                     # Class Stats
                     stats = fetch_stats(cls['_id'])
@@ -276,22 +376,102 @@ def teacher_dashboard():
                     with col1:
                         st.metric("🟢 Currently Active", active_count)
                     with col2:
-                        st.metric("📊 Avg Focus", f"{stats.get('average_score', 0.0):.1f}%")
+                        st.metric("📊 Class Avg Focus", f"{stats.get('average_score', 0.0):.1f}%")
                     with col3:
                         st.metric("📈 Total Records", stats.get('count', 0))
 
-                    # Attendance Report
-                    st.write("**📋 Attendance & Focus Report:**")
-                    attendance = fetch_attendance(cls['_id'])
-                    if attendance:
-                        att_df = pd.DataFrame(attendance)
-                        st.dataframe(att_df[['student_name', 'attended', 'avg_attention', 'frames_sent']], use_container_width=True)
+                    st.divider()
+
+                    # Low Attention Alerts
+                    low_alerts = api_request('GET', f'/classes/{cls["_id"]}/low-attention-alerts')
+                    if low_alerts and low_alerts.get('alerts'):
+                        st.warning("🔴 **LOW ATTENTION ALERTS** (< 30%)")
+                        alert_cols = st.columns(len(low_alerts.get('alerts', [])))
+                        for idx, alert_student in enumerate(low_alerts.get('alerts', [])):
+                            with alert_cols[idx % len(alert_cols)]:
+                                st.error(f"⚠️ {alert_student['student_name']}\n**{alert_student['avg_attention']}%**")
                     
-                    # Live Chart
+                    st.divider()
+
+                    # STUDENT ATTENTION DASHBOARD
+                    st.write("### 📊 **Student Attention Dashboard**")
+                    
+                    attendance = fetch_attendance(cls['_id'])
                     history = fetch_history(cls['_id'])
+                    
+                    if attendance:
+                        # Create student attention cards with mini-charts
+                        student_cols = st.columns(min(len(attendance), 4) if attendance else 1)
+                        
+                        for idx, student in enumerate(attendance):
+                            with student_cols[idx % len(student_cols)]:
+                                student_email = student.get('student_email', '')
+                                student_name = student.get('student_name', 'Unknown')
+                                avg_attention = student.get('avg_attention', 0)
+                                
+                                # Color code based on attention
+                                if avg_attention >= 70:
+                                    color = "🟢"
+                                    status = "Excellent"
+                                elif avg_attention >= 50:
+                                    color = "🟡"
+                                    status = "Good"
+                                elif avg_attention >= 30:
+                                    color = "🟠"
+                                    status = "Fair"
+                                else:
+                                    color = "🔴"
+                                    status = "Low"
+                                
+                                with st.container(border=True):
+                                    st.markdown(f"{color} **{student_name}**")
+                                    st.metric("Attention %", f"{avg_attention:.1f}%", label_visibility="collapsed")
+                                    st.caption(f"Status: {status} | Frames: {student.get('frames_sent', 0)}")
+                        
+                        st.divider()
+                        
+                        # Per-student attention trend graphs (only if history exists)
+                        if not history.empty:
+                            st.write("### 📈 **Individual Student Trends**")
+                            
+                            # Ensure student_email column exists in history
+                            if 'student_email' not in history.columns:
+                                st.info("⏳ Collecting focus data for students...")
+                            else:
+                                graph_cols = st.columns(min(len(attendance), 2))
+                                for idx, student in enumerate(attendance):
+                                    student_email = student.get('student_email', '')
+                                    student_name = student.get('student_name', 'Unknown')
+                                    
+                                    # Filter history for this student
+                                    student_history = history[history['student_email'] == student_email] if student_email else None
+                                    
+                                    with graph_cols[idx % 2]:
+                                        st.write(f"**{student_name}'s Focus Trend**")
+                                        if student_history is not None and not student_history.empty and 'focus_score' in student_history.columns:
+                                            chart_data = student_history[['timestamp', 'focus_score']].copy()
+                                            chart_data = chart_data.set_index('timestamp')
+                                            st.area_chart(chart_data, color="#00D084" if student.get('avg_attention', 0) >= 50 else "#FF6B6B")
+                                        else:
+                                            st.caption(f"No focus data yet")
+                        
+                        st.divider()
+                        
+                        # Full Attendance Table
+                        st.write("**📋 Complete Attendance Report:**")
+                        att_df = pd.DataFrame(attendance)
+                        display_cols = ['student_name', 'attended', 'avg_attention', 'frames_sent']
+                        available_cols = [col for col in display_cols if col in att_df.columns]
+                        st.dataframe(att_df[available_cols], use_container_width=True)
+                    else:
+                        st.info("⏳ Waiting for students to join and start tracking...")
+                    
+                    # Overall Class Trend
+                    st.write("**📊 Overall Class Focus Trend:**")
                     if not history.empty:
-                        st.write("**📊 Focus Trend:**")
                         st.line_chart(history.set_index("timestamp")["focus_score"])
+                    else:
+                        st.info("No focus data yet")
         else:
             st.info("ℹ️ No active classes right now.")
 
@@ -301,12 +481,49 @@ def teacher_dashboard():
         if future_classes:
             for cls in future_classes:
                 with st.expander(f"📅 {cls['class_name']} - {cls.get('start_time', 'TBD')}"):
-                    st.write(f"**Class ID:** {cls['_id']}")
-                    st.write(f"**Start:** {cls.get('start_time', 'N/A')}")
-                    st.write(f"**End:** {cls.get('end_time', 'N/A')}")
-                    st.write(f"**Enrolled Students:** {len(cls.get('enrolled_students', []))}")
-                    if st.button("🗑️ Delete Class", key=f"delete_future_{cls['_id']}"):
-                        st.warning("⚠️ Feature coming soon")
+                    col1, col2, col3 = st.columns([2, 1, 1])
+                    with col1:
+                        st.write(f"**Class ID:** {cls['_id']}")
+                        st.write(f"**Start:** {cls.get('start_time', 'N/A')}")
+                        st.write(f"**End:** {cls.get('end_time', 'N/A')}")
+                        st.write(f"**Enrolled Students:** {len(cls.get('enrolled_students', []))}")
+                    
+                    with col2:
+                        meeting_url = st.text_input("📎 Meeting URL", value=cls.get('meeting_url', ''), key=f"meeting_upcoming_{cls['_id']}")
+                        if st.button("📤 Post Link", key=f"post_link_upcoming_{cls['_id']}"):
+                            if meeting_url:
+                                result = api_request('POST', f'/classes/{cls["_id"]}/meeting-link', {'meeting_url': meeting_url})
+                                if result:
+                                    st.success("✅ Link posted!")
+                                    st.cache_data.clear()
+                                    st.rerun()
+                            else:
+                                st.error("Enter URL first")
+                    
+                    with col3:
+                        if st.button("▶️ START", key=f"start_class_{cls['_id']}", help="Start the class now"):
+                            with st.spinner("🔄 Starting class..."):
+                                response = api_request('POST', f'/classes/{cls["_id"]}/start', {})
+                                if response:
+                                    st.success("✅ Class started successfully!")
+                                    st.info("📣 Students have been notified. Refreshing dashboard...")
+                                    
+                                    # Clear all caches aggressively
+                                    for key in list(st.session_state.keys()):
+                                        if 'cache' in str(key).lower():
+                                            del st.session_state[key]
+                                    
+                                    st.cache_data.clear()
+                                    st.cache_resource.clear()
+                                    
+                                    # Wait for backend to process
+                                    import time
+                                    time.sleep(1.5)
+                                    
+                                    # Force a complete rerun
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Failed to start class")
         else:
             st.info("ℹ️ No upcoming classes scheduled.")
 
@@ -320,18 +537,30 @@ def teacher_dashboard():
                     st.write(f"**Scheduled:** {cls.get('start_time')} to {cls.get('end_time')}")
                     
                     stats = fetch_stats(cls['_id'])
-                    col1, col2 = st.columns(2)
+                    attendance = fetch_attendance(cls['_id'])
+                    
+                    col1, col2, col3 = st.columns(3)
                     with col1:
                         st.metric("📊 Final Avg Focus", f"{stats.get('average_score', 0.0):.1f}%")
                     with col2:
+                        if attendance:
+                            attended_count = sum(1 for a in attendance if a.get('attended'))
+                            st.metric("👥 Attended", f"{attended_count}/{len(attendance)}")
+                    with col3:
                         st.metric("📈 Total Records", stats.get('count', 0))
 
-                    # Attendance Report
+                    # Attendance Report with Average Attention
                     st.write("**📋 Final Attendance & Focus Report:**")
-                    attendance = fetch_attendance(cls['_id'])
                     if attendance:
                         att_df = pd.DataFrame(attendance)
-                        st.dataframe(att_df[['student_name', 'attended', 'avg_attention', 'frames_sent']], use_container_width=True)
+                        # Display relevant columns
+                        display_cols = ['student_name', 'attended', 'avg_attention', 'frames_sent']
+                        st.dataframe(att_df[display_cols].rename(columns={
+                            'avg_attention': 'Avg Attention %',
+                            'student_name': 'Student',
+                            'attended': 'Attended',
+                            'frames_sent': 'Frames'
+                        }), use_container_width=True)
                     
                     # Final Chart
                     history = fetch_history(cls['_id'])
