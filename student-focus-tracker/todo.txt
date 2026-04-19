@@ -1,2 +1,0 @@
-Clss is not being active even if i select the correct ist time its not moving to active after that time still staying in upcoming and class has to be active if and only if the teacher started the class and afterthe mentioned time and must be moved into completed class 
-studentsmonitoring must be visible for the tecaher if clicked on particular student id default it must be visible only total class focus 
