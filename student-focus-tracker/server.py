@@ -14,8 +14,40 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+# Enable CORS for all routes and origins
+CORS(app, resources={
+    r"/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization", "Accept"],
+        "supports_credentials": True
+    }
+})
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'jwt-secret-key')
+
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify({
+        'message': 'Student Focus Tracker API is running',
+        'server_ip': request.remote_addr,
+        'server_host': request.host,
+        'endpoints': [
+            'POST /register',
+            'POST /login',
+            'GET /classes',
+            'POST /classes',
+            'POST /classes/<id>/join',
+            'POST /frame',
+            'GET /history/<class_id>',
+            'GET /attendance/<class_id>',
+            'GET /stats/<class_id>',
+            'GET /admin/summary'
+        ]
+    }), 200
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({'error': 'Endpoint not found', 'message': 'Use /register, /login, /classes, etc.'}), 404
 
 # IST timezone
 ist = pytz.timezone('Asia/Kolkata')
