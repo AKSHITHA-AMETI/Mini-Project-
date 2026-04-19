@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import api from '../api';
 import { Line } from 'react-chartjs-2';
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend } from 'chart.js';
 import './Dashboard.css';
@@ -22,19 +22,19 @@ const StudentDashboard = () => {
 
   const fetchClasses = async () => {
     const token = localStorage.getItem('token');
-    const response = await axios.get('http://127.0.0.1:5000/classes', { headers: { Authorization: token } });
+    const response = await api.get('/classes', { headers: { Authorization: token } });
     setMyClasses(response.data);
   };
 
   const fetchAvailableClasses = async () => {
     const token = localStorage.getItem('token');
-    const response = await axios.get('http://127.0.0.1:5000/classes/available', { headers: { Authorization: token } });
+    const response = await api.get('/classes/available', { headers: { Authorization: token } });
     setAvailableClasses(response.data);
   };
 
   const fetchHistory = async (classId) => {
     const token = localStorage.getItem('token');
-    const response = await axios.get(`http://127.0.0.1:5000/history/${classId}`, { headers: { Authorization: token } });
+    const response = await api.get(`/history/${classId}`, { headers: { Authorization: token } });
     setHistory(response.data.history.reverse());
   };
 
@@ -47,7 +47,7 @@ const StudentDashboard = () => {
   const joinClass = async (classId) => {
     try {
       const token = localStorage.getItem('token');
-      await axios.post(`http://127.0.0.1:5000/classes/${classId}/join`, {}, { headers: { Authorization: token } });
+      await api.post(`/classes/${classId}/join`, {}, { headers: { Authorization: token } });
       setStatusMessage('Joined class successfully. Focus tracking is ready to start.');
       fetchClasses();
       fetchAvailableClasses();

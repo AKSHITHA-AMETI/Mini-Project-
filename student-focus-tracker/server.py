@@ -8,6 +8,10 @@ from flask_mail import Mail, Message
 import jwt
 import pytz
 from flask_cors import CORS
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
@@ -32,7 +36,9 @@ def verify_token(token):
         return None
 
 # ================= DB =================
-client = MongoClient('mongodb://localhost:27017/')
+# Use MongoDB Atlas (cloud) or local MongoDB
+MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
+client = MongoClient(MONGODB_URI)
 db = client['student_focus_tracker']
 
 # ================= Mail =================
@@ -404,4 +410,4 @@ def get_admin_summary():
 
 # ================= RUN =================
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', debug=True)
