@@ -6,3 +6,8 @@ flask
 pandas
 requests
 typing-extensions
+flask-cors
+flask-mail
+pymongo
+python-dotenv
+PyJWT

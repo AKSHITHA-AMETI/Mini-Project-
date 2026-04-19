@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import axios from 'axios';
+import api from '../api';
 import './Dashboard.css';
 
 const AdminDashboard = () => {
@@ -10,7 +10,7 @@ const AdminDashboard = () => {
     const fetchSummary = async () => {
       try {
         const token = localStorage.getItem('token');
-        const response = await axios.get('http://127.0.0.1:5000/admin/summary', {
+        const response = await api.get('/admin/summary', {
           headers: { Authorization: token }
         });
         setSummary(response.data);

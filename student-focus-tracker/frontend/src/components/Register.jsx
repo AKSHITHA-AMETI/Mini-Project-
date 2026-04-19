@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import axios from 'axios';
+import api from '../api';
 import { useNavigate } from 'react-router-dom';
 import './Register.css';
 
@@ -26,7 +26,7 @@ const Register = () => {
     e.preventDefault();
     setError('');
     try {
-      await axios.post('http://127.0.0.1:5000/register', formData);
+      await api.post('/register', formData);
       alert('Registration successful! Please login.');
       navigate('/');
     } catch (e) {

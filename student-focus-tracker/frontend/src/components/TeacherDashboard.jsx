@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import api from '../api';
 import { Line } from 'react-chartjs-2';
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend } from 'chart.js';
 import './Dashboard.css';
@@ -23,16 +23,16 @@ const TeacherDashboard = () => {
 
   const fetchClasses = async () => {
     const token = localStorage.getItem('token');
-    const response = await axios.get('http://127.0.0.1:5000/classes', { headers: { Authorization: token } });
+    const response = await api.get('/classes', { headers: { Authorization: token } });
     setClasses(response.data);
   };
 
   const fetchData = async (classId) => {
     const token = localStorage.getItem('token');
     const [statsRes, attendanceRes, historyRes] = await Promise.all([
-      axios.get(`http://127.0.0.1:5000/stats/${classId}`, { headers: { Authorization: token } }),
-      axios.get(`http://127.0.0.1:5000/attendance/${classId}`, { headers: { Authorization: token } }),
-      axios.get(`http://127.0.0.1:5000/history/${classId}`, { headers: { Authorization: token } })
+      api.get(`/stats/${classId}`, { headers: { Authorization: token } }),
+      api.get(`/attendance/${classId}`, { headers: { Authorization: token } }),
+      api.get(`/history/${classId}`, { headers: { Authorization: token } }),
     ]);
     setStats(statsRes.data);
     setAttendance(attendanceRes.data);
@@ -53,7 +53,7 @@ const TeacherDashboard = () => {
 
     try {
       const token = localStorage.getItem('token');
-      await axios.post('http://127.0.0.1:5000/classes', newClass, { headers: { Authorization: token } });
+      await api.post('/classes', newClass, { headers: { Authorization: token } });
       setNewClass({ class_name: '', start_time: '', end_time: '', meeting_url: '' });
       setErrors('');
       setStatusMessage('Class created successfully.');
