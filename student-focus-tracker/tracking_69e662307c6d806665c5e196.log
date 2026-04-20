@@ -1,0 +1,52 @@
+
+============================================================
+Started at: 2026-04-20 23:00:57.235793+05:30
+Student: abc@gmail.com
+Class ID: 69e662307c6d806665c5e196
+Command: python main.py 69e662307c6d806665c5e196 eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNjllNGM2MmM2ZGRlYmU1MjMzYzIwOWRkIiwiZXhwIjoxNzc2NzkwNTM4fQ.Q4G4uebv6cHqS2g79IHCStE1LqrSl_3tchvNceNNVbc --headless
+Working dir: C:\Users\akshi\OneDrive\Documents\GitHub\Mini-Project-\student-focus-tracker
+============================================================
+
+  File "C:\Users\akshi\OneDrive\Documents\GitHub\Mini-Project-\student-focus-tracker\main.py", line 257
+    global DISPLAY_WINDOW, TOKEN
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SyntaxError: name 'DISPLAY_WINDOW' is used prior to global declaration
+
+============================================================
+Started at: 2026-04-20 23:01:10.252482+05:30
+Student: akshh@gmail.com
+Class ID: 69e662307c6d806665c5e196
+Command: python main.py 69e662307c6d806665c5e196 eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNjllNjYyOTU3YzZkODA2NjY1YzVlMTk3IiwiZXhwIjoxNzc2NzkyNjEzfQ.-53kqFcqiI7D9JkaCOp3YIdWVo-z9uvhTV7K7Mr6pxI --headless
+Working dir: C:\Users\akshi\OneDrive\Documents\GitHub\Mini-Project-\student-focus-tracker
+============================================================
+
+  File "C:\Users\akshi\OneDrive\Documents\GitHub\Mini-Project-\student-focus-tracker\main.py", line 257
+    global DISPLAY_WINDOW, TOKEN
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SyntaxError: name 'DISPLAY_WINDOW' is used prior to global declaration
+
+============================================================
+Started at: 2026-04-20 23:06:32.410703+05:30
+Student: abc@gmail.com
+Class ID: 69e662307c6d806665c5e196
+Command: python main.py 69e662307c6d806665c5e196 eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNjllNGM2MmM2ZGRlYmU1MjMzYzIwOWRkIiwiZXhwIjoxNzc2NzkwNTM4fQ.Q4G4uebv6cHqS2g79IHCStE1LqrSl_3tchvNceNNVbc --headless
+Working dir: C:\Users\akshi\OneDrive\Documents\GitHub\Mini-Project-\student-focus-tracker
+============================================================
+
+  File "C:\Users\akshi\OneDrive\Documents\GitHub\Mini-Project-\student-focus-tracker\main.py", line 257
+    global DISPLAY_WINDOW, TOKEN
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SyntaxError: name 'DISPLAY_WINDOW' is used prior to global declaration
+
+============================================================
+Started at: 2026-04-20 23:07:02.904588+05:30
+Student: akshh@gmail.com
+Class ID: 69e662307c6d806665c5e196
+Command: python main.py 69e662307c6d806665c5e196 eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNjllNjYyOTU3YzZkODA2NjY1YzVlMTk3IiwiZXhwIjoxNzc2NzkyNjEzfQ.-53kqFcqiI7D9JkaCOp3YIdWVo-z9uvhTV7K7Mr6pxI --headless
+Working dir: C:\Users\akshi\OneDrive\Documents\GitHub\Mini-Project-\student-focus-tracker
+============================================================
+
+  File "C:\Users\akshi\OneDrive\Documents\GitHub\Mini-Project-\student-focus-tracker\main.py", line 257
+    global DISPLAY_WINDOW, TOKEN
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SyntaxError: name 'DISPLAY_WINDOW' is used prior to global declaration

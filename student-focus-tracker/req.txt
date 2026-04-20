@@ -11,3 +11,9 @@ flask-mail
 pymongo
 python-dotenv
 PyJWT
+scipy
+scikit-learn
+tensorflow
+torch
+torchvision
+pillow
