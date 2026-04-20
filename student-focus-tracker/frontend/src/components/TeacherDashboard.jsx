@@ -39,6 +39,20 @@ const TeacherDashboard = () => {
     setHistory(historyRes.data.history.reverse());
   };
 
+  const copyJoinLink = async (classId) => {
+    const joinUrl = `${window.location.origin}/student?join=${classId}`;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        await navigator.clipboard.writeText(joinUrl);
+        alert('Student join link copied to clipboard! Share this URL with students.');
+        return;
+      } catch (err) {
+        console.warn('Clipboard write failed:', err);
+      }
+    }
+    prompt('Copy this student join link:', joinUrl);
+  };
+
   const handleClassSelect = (cls) => {
     setSelectedClass(cls);
     fetchData(cls._id);
@@ -109,6 +123,13 @@ const TeacherDashboard = () => {
                 <p>Status: {cls.status}</p>
                 <p>Students: {cls.student_emails?.length || 0}</p>
                 <p>Start: {new Date(cls.start_time).toLocaleString()}</p>
+                <button
+                  type="button"
+                  className="action-btn"
+                  onClick={(e) => { e.stopPropagation(); copyJoinLink(cls._id); }}
+                >
+                  Copy Student Join Link
+                </button>
               </div>
             ))}
           </div>

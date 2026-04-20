@@ -9,6 +9,8 @@ import jwt
 import pytz
 from flask_cors import CORS
 from dotenv import load_dotenv
+import subprocess
+import platform
 
 # Load environment variables from .env file
 load_dotenv()
@@ -37,8 +39,11 @@ def index():
             'GET /classes',
             'POST /classes',
             'POST /classes/<id>/join',
+            'GET /classes/<id>/status',
+            'POST /start-tracking/<id>',
             'POST /frame',
             'GET /history/<class_id>',
+            'GET /tracking-logs/<class_id>',
             'GET /attendance/<class_id>',
             'GET /stats/<class_id>',
             'GET /admin/summary'
@@ -279,6 +284,36 @@ def join_class(class_id):
 
     return jsonify({'message': 'Joined class successfully'}), 200
 
+# ================= CLASS STATUS =================
+@app.route('/classes/<class_id>/status', methods=['GET'])
+def get_class_status(class_id):
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    cls = db.classes.find_one({'_id': ObjectId(class_id)})
+    if not cls:
+        return jsonify({'error': 'Class not found'}), 404
+
+    # Update status based on current time
+    now = datetime.now(ist)
+    start = datetime.fromisoformat(cls['start_time'])
+    end = datetime.fromisoformat(cls['end_time'])
+
+    if cls['status'] != 'completed':
+        if now < start:
+            new_status = 'upcoming'
+        elif start <= now <= end:
+            new_status = 'active'
+        else:
+            new_status = 'completed'
+
+        if new_status != cls['status']:
+            db.classes.update_one({'_id': ObjectId(class_id)}, {'$set': {'status': new_status}})
+            cls['status'] = new_status
+
+    return jsonify({'status': cls['status'], '_id': str(cls['_id']), 'class_name': cls['class_name']}), 200
+
 # ================= FRAME =================
 @app.route('/frame', methods=['POST'])
 def add_frame():
@@ -421,6 +456,115 @@ def get_stats(class_id):
 
     return jsonify({'average': 0, 'count': 0}), 200
 
+# ================= START TRACKING =================
+@app.route('/start-tracking/<class_id>', methods=['POST'])
+def start_tracking(class_id):
+    print(f"[{datetime.now(ist)}] START-TRACKING called for class {class_id}")
+    
+    user = get_current_user()
+    if not user or user['role'] != 'student':
+        print(f"[{datetime.now(ist)}] Unauthorized: user={user}, role={user.get('role') if user else 'None'}")
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    cls = db.classes.find_one({'_id': ObjectId(class_id)})
+    if not cls:
+        print(f"[{datetime.now(ist)}] Class not found: {class_id}")
+        return jsonify({'error': 'Class not found'}), 404
+
+    if user['email'] not in cls.get('student_emails', []):
+        print(f"[{datetime.now(ist)}] User not in class: {user['email']} not in {cls.get('student_emails', [])}")
+        return jsonify({'error': 'You must join the class before tracking'}), 403
+
+    if cls.get('status') != 'active':
+        print(f"[{datetime.now(ist)}] Class not active: status={cls.get('status')}")
+        return jsonify({'error': 'Class is not active'}), 400
+
+    try:
+        # Get the token from the Authorization header
+        token = request.headers.get('Authorization', '')
+        print(f"[{datetime.now(ist)}] Token length: {len(token)}")
+        
+        # Get the directory where server.py is located
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        print(f"[{datetime.now(ist)}] Base dir: {base_dir}")
+        
+        # Create a log file for tracking subprocess
+        log_file_path = os.path.join(base_dir, f'tracking_{class_id}.log')
+        print(f"[{datetime.now(ist)}] Log file: {log_file_path}")
+        
+        try:
+            # Windows environment setup
+            env = os.environ.copy()
+            env['FOCUS_API_URL'] = 'http://localhost:5000'
+            
+            # Build command
+            if platform.system() == 'Windows':
+                cmd = ['python', 'main.py', class_id, token, '--headless']
+            else:
+                cmd = ['python3', 'main.py', class_id, token, '--headless']
+            
+            print(f"[{datetime.now(ist)}] Launching subprocess: {' '.join(cmd[:3])}... in {base_dir}")
+            
+            # Launch tracking with proper file handling
+            with open(log_file_path, 'a') as log_file:
+                log_file.write(f"\n{'='*60}\n")
+                log_file.write(f"Started at: {datetime.now(ist)}\n")
+                log_file.write(f"Student: {user['email']}\n")
+                log_file.write(f"Class ID: {class_id}\n")
+                log_file.write(f"Command: {' '.join(cmd)}\n")
+                log_file.write(f"Working dir: {base_dir}\n")
+                log_file.write(f"{'='*60}\n\n")
+                log_file.flush()
+                
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=base_dir,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if platform.system() == 'Windows' else 0
+                )
+            
+            print(f"[{datetime.now(ist)}] Subprocess PID: {proc.pid}")
+            print(f"[{datetime.now(ist)}] Log file: {log_file_path}")
+            
+            return jsonify({'message': 'Tracking started successfully', 'pid': proc.pid, 'log_file': log_file_path}), 200
+            
+        except Exception as subprocess_error:
+            error_msg = str(subprocess_error)
+            print(f"[{datetime.now(ist)}] Subprocess error: {error_msg}")
+            
+            # Write error to log file for debugging
+            with open(log_file_path, 'a') as log_file:
+                log_file.write(f"ERROR: {error_msg}\n")
+            
+            return jsonify({'error': f'Subprocess error: {error_msg}'}), 500
+            
+    except Exception as e:
+        print(f"[{datetime.now(ist)}] Error starting tracking: {e}")
+        return jsonify({'error': f'Failed to start tracking: {str(e)}'}), 500
+
+# ================= TRACKING LOGS =================
+@app.route('/tracking-logs/<class_id>', methods=['GET'])
+def get_tracking_logs(class_id):
+    """Get the tracking log file for debugging"""
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        log_file = os.path.join(base_dir, f'tracking_{class_id}.log')
+        
+        if os.path.exists(log_file):
+            with open(log_file, 'r') as f:
+                logs = f.read()
+            return jsonify({'logs': logs, 'file': log_file}), 200
+        else:
+            return jsonify({'logs': '', 'message': 'No log file found yet', 'file': log_file}), 200
+    except Exception as e:
+        return jsonify({'error': f'Failed to read logs: {str(e)}'}), 500
+
 # ================= ADMIN =================
 @app.route('/admin/summary', methods=['GET'])
 def get_admin_summary():
@@ -442,4 +586,4 @@ def get_admin_summary():
 
 # ================= RUN =================
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', debug=True)
+    app.run(host='0.0.0.0', debug=False)
