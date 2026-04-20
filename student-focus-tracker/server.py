@@ -314,69 +314,156 @@ def get_class_status(class_id):
 
     return jsonify({'status': cls['status'], '_id': str(cls['_id']), 'class_name': cls['class_name']}), 200
 
-# ================= FRAME =================
-@app.route('/frame', methods=['POST'])
-def add_frame():
+# ================= UPLOAD LOCAL FOCUS DATA =================
+@app.route('/upload-focus-data/<class_id>', methods=['POST'])
+def upload_focus_data(class_id):
+    """Endpoint for devices to upload their local focus tracking data"""
     user = get_current_user()
     if not user or user['role'] != 'student':
         return jsonify({'error': 'Unauthorized'}), 403
-
-    data = request.get_json()
-    class_id = data.get('class_id')
-    if not class_id:
-        return jsonify({'error': 'Class ID is required'}), 400
 
     class_doc = db.classes.find_one({'_id': ObjectId(class_id)})
     if not class_doc:
         return jsonify({'error': 'Class not found'}), 404
 
     if user['email'] not in class_doc.get('student_emails', []):
-        return jsonify({'error': 'You must join the class before sending frames'}), 403
+        return jsonify({'error': 'You must join the class before uploading data'}), 403
 
-    now = datetime.now(ist)
-    frame = {
-        'timestamp': now.isoformat(),
-        'student_email': user['email'],
-        'student_id': user.get('student_id'),
+    try:
+        data = request.get_json()
+        device_id = data.get('device_id', f"device_{os.getpid()}")
+
+        if not data.get('focus_data') or not isinstance(data['focus_data'], list):
+            return jsonify({'error': 'focus_data array is required'}), 400
+
+        uploaded_count = 0
+        for frame in data['focus_data']:
+            # Add device and student identification
+            frame['student_email'] = user['email']
+            frame['student_id'] = user.get('student_id')
+            frame['class_id'] = class_id
+            frame['device_id'] = device_id
+            frame['uploaded_at'] = datetime.now(ist).isoformat()
+
+            # Insert into database
+            db.frames.insert_one(frame)
+            uploaded_count += 1
+
+        # Update student status
+        student_status = class_doc.get('student_status', {})
+        student_record = student_status.get(user['email'], {'low_focus_count': 0, 'last_frame': None, 'devices': []})
+
+        if device_id not in student_record.get('devices', []):
+            student_record['devices'] = student_record.get('devices', []) + [device_id]
+
+        student_record['last_upload'] = datetime.now(ist).isoformat()
+        student_status[user['email']] = student_record
+        db.classes.update_one({'_id': class_doc['_id']}, {'$set': {'student_status': student_status}})
+
+        return jsonify({
+            'message': f'Successfully uploaded {uploaded_count} focus data points',
+            'device_id': device_id,
+            'uploaded_count': uploaded_count
+        }), 201
+
+    except Exception as e:
+        print(f"Upload error: {e}")
+        return jsonify({'error': 'Failed to upload focus data'}), 500
+
+# ================= GET MULTI-DEVICE STATS =================
+@app.route('/multi-device-stats/<class_id>', methods=['GET'])
+def get_multi_device_stats(class_id):
+    """Get aggregated stats from all devices for a class"""
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    class_doc = db.classes.find_one({'_id': ObjectId(class_id)})
+    if not class_doc:
+        return jsonify({'error': 'Class not found'}), 404
+
+    if user['role'] == 'teacher' and class_doc.get('teacher_email') != user['email']:
+        return jsonify({'error': 'Unauthorized'}), 403
+    if user['role'] == 'student' and user['email'] not in class_doc.get('student_emails', []):
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    # Aggregate data by student, combining all their devices
+    pipeline = [
+        {'$match': {'class_id': class_id}},
+        {'$group': {
+            '_id': '$student_email',
+            'avg_focus': {'$avg': '$focus_score'},
+            'total_frames': {'$sum': 1},
+            'devices': {'$addToSet': '$device_id'},
+            'latest_timestamp': {'$max': '$timestamp'},
+            'focus_scores': {'$push': '$focus_score'},
+            'gaze_directions': {'$push': '$gaze'},
+            'head_directions': {'$push': '$head_direction'},
+            'yawning_events': {'$sum': {'$cond': ['$yawning', 1, 0]}},
+            'laughing_events': {'$sum': {'$cond': ['$laughing', 1, 0]}},
+            'eyes_closed_events': {'$sum': {'$cond': [{'$eq': ['$gaze', 'Eyes Closed']}, 1, 0]}}
+        }}
+    ]
+
+    results = list(db.frames.aggregate(pipeline))
+
+    # Enrich with user details
+    enriched_results = []
+    for result in results:
+        student_email = result['_id']
+        student_user = db.users.find_one({'email': student_email})
+
+        if student_user:
+            # Calculate focus score distribution
+            focus_scores = result.get('focus_scores', [])
+            low_focus_count = sum(1 for score in focus_scores if score < 4)
+            high_focus_count = sum(1 for score in focus_scores if score >= 7)
+
+            enriched_results.append({
+                'student_email': student_email,
+                'student_name': student_user.get('name', student_email),
+                'student_id': student_user.get('student_id'),
+                'avg_focus_score': round(result.get('avg_focus', 0), 1),
+                'total_frames': result.get('total_frames', 0),
+                'device_count': len(result.get('devices', [])),
+                'devices': result.get('devices', []),
+                'latest_activity': result.get('latest_timestamp'),
+                'focus_distribution': {
+                    'low': low_focus_count,
+                    'medium': len(focus_scores) - low_focus_count - high_focus_count,
+                    'high': high_focus_count
+                },
+                'behavioral_events': {
+                    'yawning': result.get('yawning_events', 0),
+                    'laughing': result.get('laughing_events', 0),
+                    'eyes_closed': result.get('eyes_closed_events', 0)
+                },
+                'gaze_summary': summarize_gaze_directions(result.get('gaze_directions', [])),
+                'head_pose_summary': summarize_head_directions(result.get('head_directions', []))
+            })
+
+    return jsonify({
         'class_id': class_id,
-        'focus_score': data.get('focus_score', 0),
-        'face_detected': data.get('face_detected', True)
-    }
+        'class_name': class_doc.get('class_name'),
+        'total_students': len(enriched_results),
+        'student_stats': enriched_results
+    }), 200
 
-    db.frames.insert_one(frame)
+def summarize_gaze_directions(gaze_list):
+    """Summarize gaze directions into counts"""
+    summary = {}
+    for gaze in gaze_list:
+        if gaze:
+            summary[gaze] = summary.get(gaze, 0) + 1
+    return summary
 
-    student_status = class_doc.get('student_status', {})
-    student_record = student_status.get(user['email'], {'low_focus_count': 0, 'last_frame': None})
-
-    if student_record.get('last_frame'):
-        last_time = datetime.fromisoformat(student_record['last_frame'])
-        gap = now - last_time
-    else:
-        gap = None
-
-    # Inactivity alert for teacher when a student returns after a long pause
-    inactivity_threshold = timedelta(minutes=10)
-    teacher_email = class_doc.get('teacher_email')
-    if gap and gap > inactivity_threshold and class_doc.get('status') == 'active' and teacher_email:
-        send_alert(teacher_email, f"Student {user.get('student_id') or user['email']} was inactive for {int(gap.total_seconds() / 60)} minutes in {class_doc['class_name']}.")
-
-    if frame['focus_score'] < 4:
-        student_record['low_focus_count'] = student_record.get('low_focus_count', 0) + 1
-        if student_record['low_focus_count'] == 2:
-            send_alert(user['email'], f"Low focus alert: your focus score is low in class {class_doc['class_name']}. Please pay attention.")
-        elif student_record['low_focus_count'] >= 3 and teacher_email:
-            send_alert(teacher_email, f"Student {user.get('student_id') or user['email']} has been low focus repeatedly in {class_doc['class_name']}.")
-    else:
-        student_record['low_focus_count'] = 0
-
-    student_record['last_frame'] = now.isoformat()
-    student_status[user['email']] = student_record
-    db.classes.update_one({'_id': class_doc['_id']}, {'$set': {'student_status': student_status}})
-
-    if not frame['face_detected']:
-        send_alert(user['email'], 'Face not detected. Please adjust your camera.')
-
-    return jsonify({'status': 'ok'}), 201
+def summarize_head_directions(head_list):
+    """Summarize head directions into counts"""
+    summary = {}
+    for head in head_list:
+        if head:
+            summary[head] = summary.get(head, 0) + 1
+    return summary
 
 # ================= ALERT =================
 def send_alert(email, message):

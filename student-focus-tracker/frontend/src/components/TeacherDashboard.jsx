@@ -12,6 +12,7 @@ const TeacherDashboard = () => {
   const [stats, setStats] = useState({});
   const [attendance, setAttendance] = useState([]);
   const [history, setHistory] = useState([]);
+  const [multiDeviceStats, setMultiDeviceStats] = useState(null);
   const [newClass, setNewClass] = useState({ class_name: '', start_time: '', end_time: '', meeting_url: '' });
   const [errors, setErrors] = useState('');
   const [statusMessage, setStatusMessage] = useState('');
@@ -29,14 +30,20 @@ const TeacherDashboard = () => {
 
   const fetchData = async (classId) => {
     const token = localStorage.getItem('token');
-    const [statsRes, attendanceRes, historyRes] = await Promise.all([
+    const [statsRes, attendanceRes, historyRes, multiDeviceRes] = await Promise.all([
       api.get(`/stats/${classId}`, { headers: { Authorization: token } }),
       api.get(`/attendance/${classId}`, { headers: { Authorization: token } }),
       api.get(`/history/${classId}`, { headers: { Authorization: token } }),
+      api.get(`/multi-device-stats/${classId}`, { headers: { Authorization: token } }).catch(() => ({ data: null })) // Fallback for backward compatibility
     ]);
     setStats(statsRes.data);
     setAttendance(attendanceRes.data);
     setHistory(historyRes.data.history.reverse());
+
+    // Set multi-device stats if available
+    if (multiDeviceRes.data) {
+      setMultiDeviceStats(multiDeviceRes.data);
+    }
   };
 
   const copyJoinLink = async (classId) => {
@@ -220,6 +227,102 @@ const TeacherDashboard = () => {
                 ))}
               </div>
             </section>
+
+            {multiDeviceStats && (
+              <section className="multi-device-section">
+                <h2>🔄 Multi-Device Focus Data</h2>
+                <div className="multi-device-summary">
+                  <div className="summary-card">
+                    <h3>Total Students</h3>
+                    <p className="stat-value">{multiDeviceStats.total_students}</p>
+                  </div>
+                  <div className="summary-card">
+                    <h3>Class</h3>
+                    <p className="stat-value">{multiDeviceStats.class_name}</p>
+                  </div>
+                </div>
+
+                <div className="device-stats-list">
+                  {multiDeviceStats.student_stats?.map((student) => (
+                    <div key={student.student_email} className="device-stats-item">
+                      <div className="student-header">
+                        <strong>{student.student_name}</strong>
+                        <span className="student-id">({student.student_id || 'N/A'})</span>
+                        <span className="device-count">📱 {student.device_count} device{student.device_count !== 1 ? 's' : ''}</span>
+                      </div>
+
+                      <div className="stats-row">
+                        <div className="stat-item">
+                          <span className="label">Avg Focus:</span>
+                          <span className={`value ${student.avg_focus_score >= 7 ? 'high' : student.avg_focus_score >= 4 ? 'medium' : 'low'}`}>
+                            {student.avg_focus_score}/10
+                          </span>
+                        </div>
+                        <div className="stat-item">
+                          <span className="label">Total Frames:</span>
+                          <span className="value">{student.total_frames}</span>
+                        </div>
+                        <div className="stat-item">
+                          <span className="label">Last Activity:</span>
+                          <span className="value">
+                            {student.latest_activity ? new Date(student.latest_activity).toLocaleString() : 'N/A'}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="focus-distribution">
+                        <div className="distribution-bar">
+                          <div
+                            className="bar-segment low"
+                            style={{ width: `${(student.focus_distribution.low / student.total_frames) * 100}%` }}
+                            title={`Low focus: ${student.focus_distribution.low}`}
+                          ></div>
+                          <div
+                            className="bar-segment medium"
+                            style={{ width: `${(student.focus_distribution.medium / student.total_frames) * 100}%` }}
+                            title={`Medium focus: ${student.focus_distribution.medium}`}
+                          ></div>
+                          <div
+                            className="bar-segment high"
+                            style={{ width: `${(student.focus_distribution.high / student.total_frames) * 100}%` }}
+                            title={`High focus: ${student.focus_distribution.high}`}
+                          ></div>
+                        </div>
+                        <div className="distribution-labels">
+                          <span>Low: {student.focus_distribution.low}</span>
+                          <span>Medium: {student.focus_distribution.medium}</span>
+                          <span>High: {student.focus_distribution.high}</span>
+                        </div>
+                      </div>
+
+                      <div className="behavior-events">
+                        <div className="event-item">
+                          <span className="event-icon">😴</span>
+                          <span>Yawning: {student.behavioral_events.yawning}</span>
+                        </div>
+                        <div className="event-item">
+                          <span className="event-icon">😄</span>
+                          <span>Laughing: {student.behavioral_events.laughing}</span>
+                        </div>
+                        <div className="event-item">
+                          <span className="event-icon">😑</span>
+                          <span>Eyes Closed: {student.behavioral_events.eyes_closed}</span>
+                        </div>
+                      </div>
+
+                      <div className="device-list">
+                        <strong>Devices:</strong>
+                        {student.devices.map((device, idx) => (
+                          <span key={idx} className="device-tag">{device}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )) || (
+                    <div className="empty-card">No multi-device data available yet. Students need to upload their local tracking data.</div>
+                  )}
+                </div>
+              </section>
+            )}
 
             <section className="chart-section">
               <h2>📈 Focus Trend</h2>
