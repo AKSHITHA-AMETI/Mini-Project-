@@ -15,14 +15,20 @@ from utils.focus_score import compute_focus_score
 
 API_BASE_URL = os.getenv("FOCUS_API_URL", "http://127.0.0.1:5000")
 CLASS_ID = None
+TOKEN = None
 API_STATUS_URL = None
 API_FRAME_URL = None
 DISPLAY_WINDOW = True  # Flag to control whether to show video window
 
+def log_message(msg):
+    """Print message with timestamp"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{timestamp}] {msg}")
+
 def check_class_status(token=None):
     """Check if class is active before sending tracking data."""
     if not API_STATUS_URL or not CLASS_ID:
-        print("Warning: CLASS_ID not set, assuming inactive")
+        log_message("Warning: CLASS_ID not set, assuming inactive")
         return False
     try:
         headers = {}
@@ -36,35 +42,52 @@ def check_class_status(token=None):
             status = cls.get("status", "inactive") if isinstance(data, dict) else None
             return status == "active"
         else:
-            print("Warning: Could not check class status, assuming inactive")
-            return False
+            log_message(f"Warning: Could not check class status, returned {resp.status_code}")
+            return True  # Continue tracking even if status check fails
     except requests.RequestException as e:
-        print("Warning: Class status check failed, assuming inactive:", e)
-        return False
+        log_message(f"Warning: Class status check failed: {e}")
+        return True  # Continue tracking if connection fails
 
 def run_attention_tracker(token=None, headless=False):
     """Run the focus tracking for a specific class."""
     if not CLASS_ID:
-        print("Error: CLASS_ID is required. Usage: python main.py <class_id>")
+        log_message("Error: CLASS_ID is required. Usage: python main.py <class_id> <token> [--headless]")
         return
     
-    global DISPLAY_WINDOW
+    global DISPLAY_WINDOW, TOKEN
+    TOKEN = token
     DISPLAY_WINDOW = not headless  # Disable display if running headless
     
-    print(f"Starting Student Focus Tracker for class: {CLASS_ID}")
-    print(f"Display Mode: {'Enabled' if DISPLAY_WINDOW else 'Headless (background)'}")
+    log_message(f"Starting tracking for class: {CLASS_ID}")
+    log_message(f"API Base URL: {API_BASE_URL}")
+    log_message(f"Display Mode: {'Enabled' if DISPLAY_WINDOW else 'Headless (background)'}")
+    log_message(f"Authenticated: {bool(token)}")
     
+    # Try to access camera
     cap = cv2.VideoCapture(0)
+    
+    if not cap.isOpened():
+        log_message("Error: Webcam not found or unable to access it.")
+        log_message("Attempting fallback: trying different camera indices...")
+        for i in range(1, 5):
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                log_message(f"Found camera at index {i}")
+                break
+        if not cap.isOpened():
+            log_message("Error: No camera found on this device")
+            log_message("Camera is required for focus tracking. Please ensure:")
+            log_message("  1. Camera device is connected")
+            log_message("  2. Camera has proper permissions")
+            log_message("  3. No other application is using the camera")
+            return
+
     last_processed = 0.0
     process_interval = random.uniform(8.0, 10.0)
     last_status_check = 0.0
     status_check_interval = 10.0  # Check status every 10 seconds
 
-    if not cap.isOpened():
-        print("Error: Webcam not found or unable to access it.")
-        return
-
-    print("Starting Student Focus Tracker. Press 'q' to stop (or CTRL+C).")
+    log_message("Camera initialized. Starting focus tracking loop...")
 
     gaze = "Unknown"
     head_direction = "Unknown"
@@ -74,21 +97,25 @@ def run_attention_tracker(token=None, headless=False):
     width = 0.0
     height = 0.0
     class_active = True
+    frame_count = 0
+    sent_frames = 0
 
     while cap.isOpened() and class_active:
         try:
             ret, frame = cap.read()
             if not ret:
+                log_message("Error: Failed to read frame from camera")
                 break
 
+            frame_count += 1
             now = time.time()
             
             # Check class status every 10 seconds
             if now - last_status_check >= status_check_interval:
                 last_status_check = now
-                class_active = check_class_status(token)
+                class_active = check_class_status(TOKEN)
                 if not class_active:
-                    print("Class has ended. Stopping tracker...")
+                    log_message("Class has ended. Stopping tracker...")
                     break
 
             if now - last_processed >= process_interval:
@@ -102,8 +129,10 @@ def run_attention_tracker(token=None, headless=False):
                     yawning, mouth_distance = estimate_yawn(frame)
                     laughing, width, height = estimate_laugh(frame)
                 except Exception as e:
-                    print(f"Warning: Detection error: {e}")
-                    continue
+                    log_message(f"Warning: Detection error: {e}")
+                    face_detections = []
+                    gaze = "Unknown"
+                    head_direction = "Unknown"
 
                 # Focus score is computed internally for logic; not drawn on video now
                 focus_score = compute_focus_score(gaze, head_direction, yawning, laughing)
@@ -112,7 +141,7 @@ def run_attention_tracker(token=None, headless=False):
                 try:
                     annotate_faces(frame, face_detections)
                 except Exception as e:
-                    print(f"Warning: Annotation error: {e}")
+                    log_message(f"Warning: Annotation error: {e}")
 
                 # Send frame event to backend
                 payload = {
@@ -129,20 +158,22 @@ def run_attention_tracker(token=None, headless=False):
                 }
 
                 headers = {}
-                if token:
-                    headers['Authorization'] = token
+                if TOKEN:
+                    headers['Authorization'] = TOKEN
 
                 try:
                     resp = requests.post(API_FRAME_URL, json=payload, headers=headers, timeout=2)
-                    if not resp.ok:
-                        print(f"Warning: /frame API returned {resp.status_code}")
+                    if resp.ok:
+                        sent_frames += 1
+                    else:
+                        log_message(f"Warning: /frame API returned {resp.status_code}: {resp.text[:100]}")
                 except requests.RequestException as e:
-                    print(f"Warning: /frame API request failed: {e}")
+                    log_message(f"Warning: /frame API request failed: {e}")
 
                 # Randomize next interval early to avoid fixed schedule
                 process_interval = random.uniform(8.0, 10.0)
 
-            # Display overlay only if display window is enabled
+            # Display overlay only if display window is enabled and not headless
             if DISPLAY_WINDOW:
                 try:
                     frame_copy = frame.copy()
@@ -150,26 +181,26 @@ def run_attention_tracker(token=None, headless=False):
                     cv2.putText(frame_copy, f"Head: {head_direction}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                     cv2.putText(frame_copy, f"Yawn: {yawning} / {int(mouth_distance)}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                     cv2.putText(frame_copy, f"Laugh: {laughing} / W:{int(width)} H:{int(height)}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-                    cv2.putText(frame_copy, f"Class: {CLASS_ID[:8]}... | Status: {'ACTIVE' if class_active else 'ENDED'}", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if class_active else (0, 0, 255), 2)
+                    cv2.putText(frame_copy, f"Sent: {sent_frames} | Status: {'ACTIVE' if class_active else 'ENDED'}", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if class_active else (0, 0, 255), 2)
 
                     cv2.imshow("Focus Tracker", frame_copy)
 
                     # Handle keyboard input with timeout
                     key = cv2.waitKey(1) & 0xFF
                     if key == ord("q"):
-                        print("User pressed 'q'. Stopping tracker...")
+                        log_message("User pressed 'q'. Stopping tracker...")
                         break
                 except cv2.error as e:
-                    print(f"Warning: OpenCV display error (running in headless mode): {e}")
+                    log_message(f"Warning: OpenCV display error: {e}")
                     DISPLAY_WINDOW = False
                 except Exception as e:
-                    print(f"Warning: Display error: {e}")
+                    log_message(f"Warning: Display error: {e}")
                     DISPLAY_WINDOW = False
         except KeyboardInterrupt:
-            print("Interrupted by user. Stopping tracker...")
+            log_message("Interrupted by user. Stopping tracker...")
             break
         except Exception as e:
-            print(f"Error in main loop: {e}")
+            log_message(f"Error in main loop: {e}")
             continue
 
     cap.release()
@@ -177,8 +208,9 @@ def run_attention_tracker(token=None, headless=False):
         try:
             cv2.destroyAllWindows()
         except Exception as e:
-            print(f"Warning: Error closing windows: {e}")
-    print("Tracking ended.")
+            log_message(f"Warning: Error closing windows: {e}")
+    
+    log_message(f"Tracking ended. Processed {frame_count} frames, sent {sent_frames} to server.")
 
 
 if __name__ == "__main__":
@@ -191,8 +223,13 @@ if __name__ == "__main__":
         API_STATUS_URL = f"{API_BASE_URL}/classes/{CLASS_ID}/status"
         API_FRAME_URL = f"{API_BASE_URL}/frame"
         
-        run_attention_tracker(token, headless=headless)
+        if not token:
+            log_message("Warning: No token provided, requests may fail authentication")
+        
+        log_message(f"Arguments: class_id={CLASS_ID}, token={'***' if token else 'None'}, headless={headless}")
+        
+        run_attention_tracker(token=token, headless=headless)
     else:
-        print("Usage: python main.py <class_id> [token] [--headless]")
-        print("Example: python main.py 507f1f77bcf86cd799439011")
-        print("Example (headless): python main.py 507f1f77bcf86cd799439011 <token> --headless")
+        log_message("Usage: python main.py <class_id> [token] [--headless]")
+        log_message("Example: python main.py 507f1f77bcf86cd799439011 <token>")
+        log_message("Example (headless): python main.py 507f1f77bcf86cd799439011 <token> --headless")
