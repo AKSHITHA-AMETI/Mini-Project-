@@ -110,62 +110,47 @@ const StudentDashboard = () => {
   };
 
   const startTracking = async (cls) => {
-    console.log('Start tracking called for class:', cls._id);
-    console.log('Class object:', cls);
-    
-    // Show immediate feedback
-    alert('Starting tracking for class: ' + cls._id);
-    
     try {
       setTrackingStatus(prev => ({ ...prev, [cls._id]: true }));
+      setStatusMessage('🎥 Starting camera tracking...');
       
       const token = localStorage.getItem('token');
-      console.log('Token length:', token?.length);
-      console.log('Token exists:', !!token);
-      
-      const apiUrl = `/start-tracking/${cls._id}`;
-      console.log('Making API call to:', apiUrl);
-      
-      alert('Making API call to: ' + apiUrl);
-      
-      const response = await api.post(apiUrl, {}, { 
+      const response = await api.post(`/start-tracking/${cls._id}`, {}, { 
         headers: { Authorization: token } 
       });
 
-      console.log('API response received:', response);
-      console.log('Response status:', response.status);
-      console.log('Response data:', response.data);
-      
-      alert('API call successful! Status: ' + response.status + ', Data: ' + JSON.stringify(response.data));
-      
       if (response.status === 200) {
-        console.log('Success! Opening meeting URL:', cls.meeting_url);
+        setStatusMessage('✅ Tracking started! Opening meeting link...');
         if (cls.meeting_url) {
           window.open(cls.meeting_url, '_blank', 'noopener,noreferrer');
-          setStatusMessage('✅ Meeting opened! Tracking started in background.');
+          setTimeout(() => {
+            setStatusMessage('✅ Meeting opened & camera tracking active! Press "Stop Tracking" when done.');
+          }, 1000);
         } else {
           setStatusMessage('✅ Tracking started successfully! Your focus is being monitored.');
         }
       }
     } catch (error) {
-      console.error('Start tracking error details:', error);
-      console.error('Error response:', error.response);
-      console.error('Error message:', error.message);
-      console.error('Error code:', error.code);
+      setTrackingStatus(prev => ({ ...prev, [cls._id]: false }));
+      const errorMsg = error.response?.data?.error || error.message || 'Failed to start tracking';
+      setStatusMessage(`❌ ${errorMsg}`);
+    }
+  };
+
+  const stopTracking = async (cls) => {
+    try {
+      setStatusMessage('⏹ Stopping tracking...');
+      const token = localStorage.getItem('token');
+      
+      await api.post(`/stop-tracking/${cls._id}`, {}, { 
+        headers: { Authorization: token } 
+      });
       
       setTrackingStatus(prev => ({ ...prev, [cls._id]: false }));
-      
-      let errorMsg = '❌ Failed to start tracking: ';
-      if (error.response?.data?.error) {
-        errorMsg += error.response.data.error;
-      } else if (error.message) {
-        errorMsg += error.message;
-      } else {
-        errorMsg += 'Unknown error';
-      }
-      
-      alert('Error: ' + errorMsg);
-      setStatusMessage(errorMsg);
+      setStatusMessage('✅ Tracking stopped. Your focus data has been saved.');
+    } catch (error) {
+      const errorMsg = error.response?.data?.error || error.message || 'Failed to stop tracking';
+      setStatusMessage(`⚠ ${errorMsg}`);
     }
   };
 
@@ -260,8 +245,17 @@ const StudentDashboard = () => {
                   {cls.status === 'active' && (
                     <div>
                       {trackingStatus[cls._id] ? (
-                        <div className="tracking-active">
-                          🎥 Tracking Active - Camera monitoring in background
+                        <div className="tracking-controls">
+                          <div className="tracking-active">
+                            🎥 Camera Tracking Active
+                          </div>
+                          <button
+                            type="button"
+                            className="action-btn stop-tracking-btn"
+                            onClick={(e) => { e.stopPropagation(); stopTracking(cls); }}
+                          >
+                            ⏹ Stop Tracking
+                          </button>
                         </div>
                       ) : (
                         <button

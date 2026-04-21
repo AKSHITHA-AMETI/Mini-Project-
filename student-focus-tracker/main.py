@@ -4,6 +4,291 @@ import os
 import random
 import json
 import sys
+import requests
+from datetime import datetime, timezone
+from utils.face_detection import detect_faces, annotate_faces
+from utils.gaze_tracking import estimate_gaze
+from utils.head_pose import estimate_head_pose
+from utils.yawn_detection import estimate_yawn
+from utils.laugh_detection import estimate_laugh
+from utils.focus_score import compute_focus_score
+
+# Configuration
+CLASS_ID = None
+DISPLAY_WINDOW = True  # Flag to control whether to show video window
+SAVE_TO_FILE = True   # Save focus data to local file
+UPLOAD_TO_SERVER = True  # Upload data to server when available
+LOG_FILE = "focus_tracking_log.json"
+
+# API Configuration
+API_BASE_URL = os.getenv("FOCUS_API_URL", "http://127.0.0.1:5000")
+API_FRAME_URL = None  # Will be set based on CLASS_ID
+API_STATUS_URL = None  # Will be set based on CLASS_ID
+TOKEN = os.getenv("FOCUS_TOKEN")  # Optional token for server upload
+
+def log_message(msg):
+    """Print message with timestamp"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{timestamp}] {msg}")
+
+def send_frame_to_server(frame_data, class_id, token=None):
+    """Send individual frame data to server in real-time"""
+    if not UPLOAD_TO_SERVER:
+        return False
+
+    try:
+        frame_url = f"{API_BASE_URL}/frame"
+        headers = {'Content-Type': 'application/json'}
+        if token:
+            headers['Authorization'] = token
+
+        payload = frame_data
+        payload['class_id'] = class_id
+
+        response = requests.post(frame_url, json=payload, headers=headers, timeout=3)
+
+        if response.status_code == 201:
+            return True
+        else:
+            # Silent fail for frame uploads to avoid spamming logs
+            return False
+
+    except requests.RequestException:
+        # Silent fail for network errors
+        return False
+    except Exception:
+        return False
+
+def save_focus_data(tracking_data):
+    """Save tracking data to local JSON file"""
+    if not SAVE_TO_FILE:
+        return
+    
+    try:
+        data = []
+        if os.path.exists(LOG_FILE):
+            try:
+                with open(LOG_FILE, 'r') as f:
+                    data = json.load(f)
+            except:
+                data = []
+        
+        data.append(tracking_data)
+        
+        with open(LOG_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log_message(f"Warning: Failed to save local data: {e}")
+
+def run_attention_tracker(token=None, headless=False):
+    """Run the focus tracking on this device."""
+
+    if not CLASS_ID:
+        log_message("Error: CLASS_ID is required. Usage: python main.py <class_id> [token] [--headless]")
+        return
+
+    global DISPLAY_WINDOW
+    DISPLAY_WINDOW = not headless  # Disable display if running headless
+
+    log_message(f"Starting local focus tracking for class: {CLASS_ID}")
+    log_message(f"Display Mode: {'Enabled' if DISPLAY_WINDOW else 'Headless (background)'}")
+    log_message(f"Data Saving: {'Enabled' if SAVE_TO_FILE else 'Disabled'}")
+    log_message(f"Server Upload: {'Enabled' if UPLOAD_TO_SERVER else 'Disabled'}")
+
+    # Try to access camera
+    cap = cv2.VideoCapture(0)
+
+    if not cap.isOpened():
+        log_message("Error: Webcam not found or unable to access it.")
+        log_message("Attempting fallback: trying different camera indices...")
+        for i in range(1, 5):
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                log_message(f"Found camera at index {i}")
+                break
+        if not cap.isOpened():
+            log_message("Error: No camera found on this device")
+            log_message("Camera is required for focus tracking. Please ensure:")
+            log_message("  1. Camera device is connected")
+            log_message("  2. Camera has proper permissions")
+            log_message("  3. No other application is using the camera")
+            return
+
+    last_processed = 0.0
+    process_interval = random.uniform(8.0, 10.0)
+
+    log_message("Camera initialized. Starting focus tracking loop...")
+
+    gaze = "Unknown"
+    head_direction = "Unknown"
+    yawning = False
+    mouth_distance = 0.0
+    laughing = False
+    mouth_width = 0.0
+    mouth_height = 0.0
+    frame_count = 0
+    processed_frames = 0
+    sent_frames = 0
+    device_id = f"device_{os.getpid()}"
+
+    try:
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                log_message("Error: Failed to read frame from camera")
+                break
+
+            frame_count += 1
+            now = time.time()
+
+            if now - last_processed >= process_interval:
+                last_processed = now
+                processed_frames += 1
+
+                # Core computer vision detections
+                try:
+                    face_detections = detect_faces(frame)
+                    gaze = estimate_gaze(frame)
+                    head_direction = estimate_head_pose(frame)
+                    yawning, mouth_distance = estimate_yawn(frame)
+                    laughing, mouth_width, mouth_height = estimate_laugh(frame)
+                except Exception as e:
+                    log_message(f"Warning: Detection error: {e}")
+                    face_detections = []
+                    gaze = "Unknown"
+                    head_direction = "Unknown"
+                    yawning = False
+                    laughing = False
+
+                # Compute focus score using all detected features
+                focus_score = compute_focus_score(
+                    gaze, head_direction, yawning, laughing,
+                    mouth_distance, mouth_width, mouth_height
+                )
+
+                # Prepare tracking data
+                tracking_data = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "class_id": CLASS_ID,
+                    "device_id": device_id,
+                    "gaze": gaze,
+                    "head_direction": head_direction,
+                    "yawning": bool(yawning),
+                    "mouth_distance": float(mouth_distance),
+                    "laughing": bool(laughing),
+                    "mouth_width": float(mouth_width),
+                    "mouth_height": float(mouth_height),
+                    "focus_score": float(focus_score),
+                    "faces_detected": len(face_detections),
+                    "frame_number": frame_count
+                }
+
+                # Save data locally
+                save_focus_data(tracking_data)
+                
+                # Send frame in real-time to server
+                if send_frame_to_server(tracking_data, CLASS_ID, token):
+                    sent_frames += 1
+
+                # Log summary every 50 processed frames
+                if processed_frames % 50 == 0:
+                    log_message(f"Frame {frame_count}: Focus={focus_score}, Gaze={gaze}, Head={head_direction}, Yawn={yawning}, Laugh={laughing}, Sent={sent_frames}")
+
+                # Mark/update face boxes
+                try:
+                    annotate_faces(frame, face_detections)
+                except Exception as e:
+                    log_message(f"Warning: Annotation error: {e}")
+
+                # Randomize next interval to avoid fixed schedule
+                process_interval = random.uniform(8.0, 10.0)
+
+            # Display overlay only if display window is enabled
+            if DISPLAY_WINDOW:
+                try:
+                    frame_copy = frame.copy()
+
+                    # Display all tracking information
+                    cv2.putText(frame_copy, f"Gaze: {gaze}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                    cv2.putText(frame_copy, f"Head: {head_direction}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                    cv2.putText(frame_copy, f"Yawn: {yawning} / Dist:{int(mouth_distance)}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    cv2.putText(frame_copy, f"Laugh: {laughing} / W:{int(mouth_width)} H:{int(mouth_height)}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    cv2.putText(frame_copy, f"Focus Score: {focus_score}/10", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                    cv2.putText(frame_copy, f"Processed: {processed_frames} | Sent: {sent_frames}", (10, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+
+                    cv2.imshow("Local Focus Tracker", frame_copy)
+
+                    # Handle keyboard input
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord("q"):
+                        log_message("User pressed 'q'. Stopping tracker...")
+                        break
+                    elif key == ord("s"):
+                        # Save current frame for debugging
+                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                        filename = f"debug_frame_{timestamp}.jpg"
+                        cv2.imwrite(filename, frame_copy)
+                        log_message(f"Saved debug frame: {filename}")
+
+                except cv2.error as e:
+                    log_message(f"Warning: OpenCV display error: {e}")
+                    DISPLAY_WINDOW = False
+                except Exception as e:
+                    log_message(f"Warning: Display error: {e}")
+                    DISPLAY_WINDOW = False
+
+    except KeyboardInterrupt:
+        log_message("Interrupted by user. Stopping tracker...")
+    except Exception as e:
+        log_message(f"Error in main loop: {e}")
+    finally:
+        cap.release()
+        if DISPLAY_WINDOW:
+            try:
+                cv2.destroyAllWindows()
+            except Exception as e:
+                log_message(f"Warning: Error closing windows: {e}")
+
+    log_message(f"Tracking ended. Processed {frame_count} frames, analyzed {processed_frames} for focus.")
+    log_message(f"Sent {sent_frames} frames to server.")
+    log_message(f"Data saved to: {LOG_FILE}")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        CLASS_ID = sys.argv[1]
+        token = sys.argv[2] if len(sys.argv) > 2 else None
+        headless = "--headless" in sys.argv
+        no_upload = "--no-upload" in sys.argv
+
+        # Configure upload behavior
+        if no_upload:
+            UPLOAD_TO_SERVER = False
+            log_message("Server upload disabled by command line flag")
+
+        # Use environment token if command line token not provided
+        if not token:
+            token = TOKEN
+
+        if not token and UPLOAD_TO_SERVER:
+            log_message("Warning: No token provided, server upload may fail authentication")
+
+        log_message(f"Arguments: class_id={CLASS_ID}, token={'***' if token else 'None'}, headless={headless}, upload={UPLOAD_TO_SERVER}")
+
+        run_attention_tracker(token=token, headless=headless)
+    else:
+        log_message("Usage: python main.py <class_id> [token] [--headless] [--no-upload]")
+        log_message("Examples:")
+        log_message("  python main.py 507f1f77bcf86cd799439011 <token>                         # Full tracking with server upload")
+        log_message("  python main.py 507f1f77bcf86cd799439011 <token> --headless            # Background tracking")
+        log_message("  python main.py 507f1f77bcf86cd799439011 --no-upload                  # Local-only tracking")
+        log_message("  python main.py 507f1f77bcf86cd799439011 <token> --headless --no-upload # Background tracking without upload")
+import cv2
+import time
+import os
+import random
+import json
+import sys
 import threading
 from datetime import datetime, timezone
 from utils.face_detection import detect_faces, annotate_faces
@@ -30,37 +315,34 @@ def log_message(msg):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     print(f"[{timestamp}] {msg}")
 
-def upload_data_to_server(focus_data_batch, class_id, device_id, token=None):
-    """Upload accumulated focus data to server"""
-    if not UPLOAD_TO_SERVER or not focus_data_batch:
+def send_frame_to_server(frame_data, class_id, token=None):
+    """Send individual frame data to server in real-time"""
+    if not UPLOAD_TO_SERVER:
         return False
 
     try:
         import requests
-        upload_url = f"{API_BASE_URL}/upload-focus-data/{class_id}"
+        frame_url = f"{API_BASE_URL}/frame"
         headers = {'Content-Type': 'application/json'}
         if token:
             headers['Authorization'] = token
 
-        payload = {
-            'device_id': device_id,
-            'focus_data': focus_data_batch
-        }
+        payload = frame_data
+        payload['class_id'] = class_id
 
-        response = requests.post(upload_url, json=payload, headers=headers, timeout=10)
+        response = requests.post(frame_url, json=payload, headers=headers, timeout=5)
 
         if response.status_code == 201:
-            log_message(f"Successfully uploaded {len(focus_data_batch)} data points to server")
             return True
         else:
-            log_message(f"Server upload failed: {response.status_code} - {response.text}")
+            log_message(f"Frame upload failed: {response.status_code}")
             return False
 
     except ImportError:
         log_message("Warning: requests library not available, server upload disabled")
         return False
     except Exception as e:
-        log_message(f"Server upload error: {e}")
+        # Don't log every frame error to avoid spam
         return False
 
 def run_attention_tracker(token=None, headless=False):
@@ -171,24 +453,15 @@ def run_attention_tracker(token=None, headless=False):
                     "frame_number": frame_count
                 }
 
-                # Save data locally and accumulate for upload
+                # Save data locally
                 save_focus_data(tracking_data)
-                focus_data_batch.append(tracking_data)
-
-                # Upload data periodically
-                now = time.time()
-                if now - last_upload >= upload_interval and focus_data_batch:
-                    if upload_data_to_server(focus_data_batch, CLASS_ID, device_id, TOKEN):
-                        focus_data_batch = []  # Clear batch after successful upload
-                        last_upload = now
-                    else:
-                        # If upload fails, keep data for next attempt
-                        log_message("Upload failed, will retry next interval")
+                
+                # Send frame in real-time to server
+                send_frame_to_server(tracking_data, CLASS_ID, TOKEN)
 
                 # Log summary every 10 processed frames
                 if processed_frames % 10 == 0:
                     log_message(f"Frame {frame_count}: Focus={focus_score}, Gaze={gaze}, Head={head_direction}, Yawn={yawning}, Laugh={laughing}")
-                    log_message(f"Data points accumulated: {len(focus_data_batch)}")
 
                 # Mark/update face boxes
                 try:
@@ -245,15 +518,10 @@ def run_attention_tracker(token=None, headless=False):
             except Exception as e:
                 log_message(f"Warning: Error closing windows: {e}")
 
-        # Final upload of any remaining data
-        if focus_data_batch and UPLOAD_TO_SERVER:
-            log_message(f"Performing final upload of {len(focus_data_batch)} remaining data points...")
-            upload_data_to_server(focus_data_batch, CLASS_ID, device_id, TOKEN)
-
     log_message(f"Tracking ended. Processed {frame_count} frames, analyzed {processed_frames} for focus.")
     log_message(f"Data saved to: {LOG_FILE}")
     if UPLOAD_TO_SERVER:
-        log_message("Data upload to server completed.")
+        log_message("Real-time tracking upload to server completed.")
     global DISPLAY_WINDOW, TOKEN
     TOKEN = token
     DISPLAY_WINDOW = not headless  # Disable display if running headless
