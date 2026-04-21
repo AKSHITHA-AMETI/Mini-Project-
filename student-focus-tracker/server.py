@@ -671,6 +671,388 @@ def get_admin_summary():
 
     return jsonify(summary), 200
 
+# ================= FRAME (REAL-TIME TRACKING) =================
+@app.route('/frame', methods=['POST'])
+def receive_frame():
+    """Receive real-time tracking frame data from tracking subprocess"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'class_id' not in data:
+            return jsonify({'error': 'class_id is required'}), 400
+        
+        class_id = data.get('class_id')
+        
+        # Validate class exists
+        cls = db.classes.find_one({'_id': ObjectId(class_id)})
+        if not cls:
+            return jsonify({'error': 'Class not found'}), 404
+        
+        # Add server-side timestamp and store
+        data['timestamp'] = datetime.now(ist).isoformat()
+        data['class_id'] = class_id
+        
+        # Insert frame data
+        db.frames.insert_one(data)
+        
+        return jsonify({'message': 'Frame received', 'id': str(data['_id'])}), 201
+    
+    except Exception as e:
+        print(f"[{datetime.now(ist)}] Frame receive error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# ================= STOP TRACKING =================
+@app.route('/stop-tracking/<class_id>', methods=['POST'])
+def stop_tracking(class_id):
+    """Stop tracking for a class and clean up subprocess"""
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    cls = db.classes.find_one({'_id': ObjectId(class_id)})
+    if not cls:
+        return jsonify({'error': 'Class not found'}), 404
+
+    # Check authorization (student in class or teacher of class)
+    if user['role'] == 'student' and user['email'] not in cls.get('student_emails', []):
+        return jsonify({'error': 'Unauthorized'}), 403
+    if user['role'] == 'teacher' and cls.get('teacher_email') != user['email']:
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    try:
+        # Try to find and kill the tracking subprocess
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        log_file = os.path.join(base_dir, f'tracking_{class_id}.log')
+        
+        print(f"[{datetime.now(ist)}] Stopping tracking for class {class_id}")
+        
+        # Write stop signal to log for subprocess detection
+        if os.path.exists(log_file):
+            with open(log_file, 'a') as f:
+                f.write(f"\n[{datetime.now(ist)}] STOP signal received\n")
+        
+        # On Windows, try to kill process using taskill
+        if platform.system() == 'Windows':
+            try:
+                # Find and kill python processes running main.py for this class
+                os.system(f'taskkill /F /IM python.exe /T 2>nul')
+            except:
+                pass
+        else:
+            # On Linux/Mac
+            try:
+                os.system(f'pkill -f "main.py.*{class_id}"')
+            except:
+                pass
+        
+        print(f"[{datetime.now(ist)}] Tracking stopped for class {class_id}")
+        
+        return jsonify({'message': 'Tracking stopped successfully'}), 200
+    
+    except Exception as e:
+        print(f"[{datetime.now(ist)}] Stop tracking error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# ================= COMPLETE CLASS =================
+@app.route('/classes/<class_id>/complete', methods=['POST'])
+def complete_class(class_id):
+    """Manually mark a class as completed"""
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    cls = db.classes.find_one({'_id': ObjectId(class_id)})
+    if not cls:
+        return jsonify({'error': 'Class not found'}), 404
+
+    # Only teacher can complete their class
+    if user['role'] != 'teacher' or cls.get('teacher_email') != user['email']:
+        return jsonify({'error': 'Only class teacher can complete a class'}), 403
+
+    try:
+        # Update class status
+        db.classes.update_one(
+            {'_id': ObjectId(class_id)},
+            {
+                '$set': {
+                    'status': 'completed',
+                    'completed_at': datetime.now(ist).isoformat(),
+                    'completed_by': user['email']
+                }
+            }
+        )
+        
+        return jsonify({'message': 'Class marked as completed', 'status': 'completed'}), 200
+    
+    except Exception as e:
+        print(f"[{datetime.now(ist)}] Complete class error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# ================= TEACHER DASHBOARD =================
+@app.route('/teacher/classes', methods=['GET'])
+def get_teacher_classes():
+    """Get all classes for a teacher with detailed stats"""
+    user = get_current_user()
+    if not user or user['role'] != 'teacher':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    try:
+        now = datetime.now(ist)
+        classes = list(db.classes.find({'teacher_email': user['email']}))
+        
+        class_stats = []
+        for cls in classes:
+            # Update status based on current time
+            start = datetime.fromisoformat(cls['start_time'])
+            end = datetime.fromisoformat(cls['end_time'])
+            
+            if cls['status'] != 'completed':
+                if now < start:
+                    new_status = 'upcoming'
+                elif start <= now <= end:
+                    new_status = 'active'
+                else:
+                    new_status = 'completed'
+                
+                if new_status != cls['status']:
+                    db.classes.update_one({'_id': cls['_id']}, {'$set': {'status': new_status}})
+                    cls['status'] = new_status
+            
+            # Get student focus statistics
+            student_stats = []
+            for student_email in cls.get('student_emails', []):
+                student_user = db.users.find_one({'email': student_email})
+                frames = list(db.frames.find({'class_id': str(cls['_id']), 'student_email': student_email}))
+                
+                if frames:
+                    focus_scores = [f.get('focus_score', 0) for f in frames]
+                    avg_focus = sum(focus_scores) / len(focus_scores)
+                    low_focus = sum(1 for s in focus_scores if s < 4)
+                    
+                    # Count behavioral events
+                    yawns = sum(1 for f in frames if f.get('yawning'))
+                    laughs = sum(1 for f in frames if f.get('laughing'))
+                    eyes_closed = sum(1 for f in frames if f.get('gaze') == 'Eyes Closed')
+                    
+                    student_stats.append({
+                        'student_name': student_user['name'] if student_user else student_email,
+                        'student_email': student_email,
+                        'student_id': student_user.get('student_id') if student_user else None,
+                        'avg_focus_score': round(avg_focus, 1),
+                        'total_frames': len(frames),
+                        'low_focus_frames': low_focus,
+                        'yawning_events': yawns,
+                        'laughing_events': laughs,
+                        'eyes_closed_events': eyes_closed,
+                        'attendance': 'Present' if frames else 'Absent'
+                    })
+            
+            class_stats.append({
+                'class_id': str(cls['_id']),
+                'class_name': cls['class_name'],
+                'status': cls['status'],
+                'start_time': cls['start_time'],
+                'end_time': cls['end_time'],
+                'meeting_url': cls['meeting_url'],
+                'student_count': len(cls.get('student_emails', [])),
+                'students_present': sum(1 for s in student_stats if s['attendance'] == 'Present'),
+                'avg_class_focus': round(sum(s['avg_focus_score'] for s in student_stats) / len(student_stats), 1) if student_stats else 0,
+                'student_stats': student_stats
+            })
+        
+        return jsonify(class_stats), 200
+    
+    except Exception as e:
+        print(f"[{datetime.now(ist)}] Teacher classes error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# ================= TEACHER CLASS DETAIL =================
+@app.route('/teacher/classes/<class_id>', methods=['GET'])
+def get_teacher_class_detail(class_id):
+    """Get detailed analytics for a specific class"""
+    user = get_current_user()
+    if not user or user['role'] != 'teacher':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    cls = db.classes.find_one({'_id': ObjectId(class_id)})
+    if not cls or cls.get('teacher_email') != user['email']:
+        return jsonify({'error': 'Class not found'}), 404
+
+    try:
+        # Get all frame data for the class
+        frames = list(db.frames.find({'class_id': class_id}))
+        
+        if not frames:
+            return jsonify({
+                'class_id': class_id,
+                'class_name': cls['class_name'],
+                'status': cls['status'],
+                'student_stats': [],
+                'class_insights': {'avg_focus': 0, 'total_frames': 0}
+            }), 200
+        
+        # Aggregate by student
+        student_data = {}
+        for frame in frames:
+            email = frame.get('student_email', 'Unknown')
+            if email not in student_data:
+                student_data[email] = {
+                    'frames': [],
+                    'focus_scores': [],
+                    'yawns': 0,
+                    'laughs': 0,
+                    'eyes_closed': 0
+                }
+            
+            student_data[email]['frames'].append(frame)
+            student_data[email]['focus_scores'].append(frame.get('focus_score', 0))
+            
+            if frame.get('yawning'):
+                student_data[email]['yawns'] += 1
+            if frame.get('laughing'):
+                student_data[email]['laughs'] += 1
+            if frame.get('gaze') == 'Eyes Closed':
+                student_data[email]['eyes_closed'] += 1
+        
+        # Build student stats
+        student_stats = []
+        for email, data in student_data.items():
+            student_user = db.users.find_one({'email': email})
+            scores = data['focus_scores']
+            
+            student_stats.append({
+                'student_name': student_user['name'] if student_user else email,
+                'student_email': email,
+                'student_id': student_user.get('student_id') if student_user else None,
+                'avg_focus': round(sum(scores) / len(scores), 1),
+                'min_focus': min(scores),
+                'max_focus': max(scores),
+                'total_frames': len(scores),
+                'behavioral_events': {
+                    'yawning': data['yawns'],
+                    'laughing': data['laughs'],
+                    'eyes_closed': data['eyes_closed']
+                }
+            })
+        
+        # Class insights
+        all_scores = [f.get('focus_score', 0) for f in frames]
+        class_insights = {
+            'avg_focus': round(sum(all_scores) / len(all_scores), 1) if all_scores else 0,
+            'total_frames': len(frames),
+            'total_students_participated': len(student_data),
+            'total_yawning_events': sum(1 for f in frames if f.get('yawning')),
+            'total_laughing_events': sum(1 for f in frames if f.get('laughing')),
+            'total_eyes_closed_events': sum(1 for f in frames if f.get('gaze') == 'Eyes Closed'),
+            'focus_distribution': {
+                'low': sum(1 for s in all_scores if s < 4),
+                'medium': sum(1 for s in all_scores if 4 <= s < 7),
+                'high': sum(1 for s in all_scores if s >= 7)
+            }
+        }
+        
+        return jsonify({
+            'class_id': class_id,
+            'class_name': cls['class_name'],
+            'status': cls['status'],
+            'start_time': cls['start_time'],
+            'end_time': cls['end_time'],
+            'student_stats': student_stats,
+            'class_insights': class_insights
+        }), 200
+    
+    except Exception as e:
+        print(f"[{datetime.now(ist)}] Teacher class detail error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# ================= ADMIN DASHBOARD =================
+@app.route('/admin/dashboard', methods=['GET'])
+def get_admin_dashboard():
+    """Get comprehensive admin dashboard with all system statistics"""
+    user = get_current_user()
+    if not user or user.get('role') != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    try:
+        now = datetime.now(ist)
+        
+        # System statistics
+        total_users = db.users.count_documents({})
+        students = db.users.count_documents({'role': 'student'})
+        teachers = db.users.count_documents({'role': 'teacher'})
+        admins = db.users.count_documents({'role': 'admin'})
+        
+        # Class statistics
+        total_classes = db.classes.count_documents({})
+        upcoming_classes = db.classes.count_documents({'status': 'upcoming'})
+        active_classes = db.classes.count_documents({'status': 'active'})
+        completed_classes = db.classes.count_documents({'status': 'completed'})
+        
+        # Frame/tracking statistics
+        total_frames = db.frames.count_documents({})
+        avg_focus = 0
+        if total_frames > 0:
+            result = list(db.frames.aggregate([
+                {'$group': {'_id': None, 'avg': {'$avg': '$focus_score'}}}
+            ]))
+            avg_focus = round(result[0]['avg'], 1) if result else 0
+        
+        # Behavioral events statistics
+        yawning_events = db.frames.count_documents({'yawning': True})
+        laughing_events = db.frames.count_documents({'laughing': True})
+        eyes_closed_events = db.frames.count_documents({'gaze': 'Eyes Closed'})
+        
+        # Get top teachers by class count
+        teacher_stats = list(db.classes.aggregate([
+            {'$group': {
+                '_id': '$teacher_email',
+                'class_count': {'$sum': 1},
+                'total_students': {'$sum': {'$size': '$student_emails'}}
+            }},
+            {'$sort': {'class_count': -1}},
+            {'$limit': 5}
+        ]))
+        
+        # Enrich teacher stats with names
+        enriched_teachers = []
+        for ts in teacher_stats:
+            teacher_user = db.users.find_one({'email': ts['_id']})
+            enriched_teachers.append({
+                'teacher_email': ts['_id'],
+                'teacher_name': teacher_user['name'] if teacher_user else ts['_id'],
+                'total_classes': ts['class_count'],
+                'total_students_taught': ts['total_students']
+            })
+        
+        return jsonify({
+            'system_stats': {
+                'total_users': total_users,
+                'students': students,
+                'teachers': teachers,
+                'admins': admins
+            },
+            'class_stats': {
+                'total_classes': total_classes,
+                'upcoming': upcoming_classes,
+                'active': active_classes,
+                'completed': completed_classes
+            },
+            'tracking_stats': {
+                'total_frames_received': total_frames,
+                'avg_focus_score': avg_focus,
+                'behavioral_events': {
+                    'yawning': yawning_events,
+                    'laughing': laughing_events,
+                    'eyes_closed': eyes_closed_events
+                }
+            },
+            'top_teachers': enriched_teachers
+        }), 200
+    
+    except Exception as e:
+        print(f"[{datetime.now(ist)}] Admin dashboard error: {e}")
+        return jsonify({'error': str(e)}), 500
+
 # ================= RUN =================
 if __name__ == '__main__':
     app.run(host='0.0.0.0', debug=False)
