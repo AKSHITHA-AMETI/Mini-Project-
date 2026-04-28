@@ -13,6 +13,7 @@ const Register = () => {
     secret_code: ''
   });
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
   const handleChange = (e) => {
@@ -20,17 +21,54 @@ const Register = () => {
       ...formData,
       [e.target.name]: e.target.value
     });
+    // Clear error when user starts typing
+    if (error) {
+      setError('');
+    }
   };
 
   const handleRegister = async (e) => {
     e.preventDefault();
     setError('');
+    setLoading(true);
+    
     try {
-      await api.post('/register', formData);
+      // Validation
+      if (!formData.name.trim()) {
+        setError('Name is required');
+        setLoading(false);
+        return;
+      }
+      if (!formData.email.trim()) {
+        setError('Email is required');
+        setLoading(false);
+        return;
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
+        setError('Please enter a valid email');
+        setLoading(false);
+        return;
+      }
+      if (!formData.password || formData.password.length < 6) {
+        setError('Password must be at least 6 characters');
+        setLoading(false);
+        return;
+      }
+      if ((formData.role === 'teacher' || formData.role === 'admin') && !formData.secret_code.trim()) {
+        setError(`${formData.role.charAt(0).toUpperCase() + formData.role.slice(1)} registration code is required`);
+        setLoading(false);
+        return;
+      }
+
+      const response = await api.post('/register', formData);
       alert('Registration successful! Please login.');
       navigate('/');
     } catch (e) {
-      setError(e.response?.data?.error || 'Registration failed');
+      const errorMsg = e.response?.data?.error || e.message || 'Registration failed';
+      setError(errorMsg);
+      console.error('Register error:', e);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -112,7 +150,9 @@ const Register = () => {
             </div>
           )}
           {error && <p className="form-error">{error}</p>}
-          <button type="submit" className="register-btn">Register</button>
+          <button type="submit" className="register-btn" disabled={loading}>
+            {loading ? 'Registering...' : 'Register'}
+          </button>
         </form>
         <p className="login-link">
           Already have an account? <span onClick={() => navigate('/')} className="link">Login here</span>

@@ -1,4 +1,5 @@
 Register and Login Not working in any device in local and other system
 Some Errors are also there rectify them 
 Make the project to access the camera from other device once the class is started or joined the meeting through url and must be stopped if class is end or stopped 
-the accesed video from the camera must be visible to admin in their dashboard and focus score must be genrated using the python functions mentioned 
+the accesed video from the camera must be visible to admin in their dashboard and focus score must be genrated using the python functions mentioned
+individual student wise and class wise records must be appeared even to review in future 
