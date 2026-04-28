@@ -1,5 +1,0 @@
-teacher should be able to post the class link in the classroom 
-after the teacher posts the link the students should be able to see the link
-in teacher dashboard there should be an option of start class agfter clicking on which the students should be allerted that the class is started and they should join the meeting link 
-the students camera tracking should start from then and the average attention span of each student should reach the teacher, the teacher shoild be allerted if any syudents attention is less that 30 percent
-after ending the class the teacher should get report of attention span of each student and class average attention span
