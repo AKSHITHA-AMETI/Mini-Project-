@@ -17,8 +17,12 @@ const StudentDashboard = () => {
   const [statusMessage, setStatusMessage] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [recordingSessions, setRecordingSessions] = useState({}); // classId -> sessionId
   const location = useLocation();
   const user = JSON.parse(localStorage.getItem('user') || 'null');
+  const [mediaStreams, setMediaStreams] = useState({}); // classId -> MediaStream
+  const [mediaRecorders, setMediaRecorders] = useState({}); // classId -> MediaRecorder
+  const [snapshotTimers, setSnapshotTimers] = useState({}); // classId -> intervalId
 
   useEffect(() => {
     if (!user) {
@@ -115,19 +119,79 @@ const StudentDashboard = () => {
       setStatusMessage('🎥 Starting camera tracking...');
       
       const token = localStorage.getItem('token');
-      const response = await api.post(`/start-tracking/${cls._id}`, {}, { 
-        headers: { Authorization: token } 
-      });
+      const response = await api.post(`/start-tracking/${cls._id}`, {}, { headers: { Authorization: token } });
 
       if (response.status === 200) {
-        setStatusMessage('✅ Tracking started! Opening meeting link...');
+        // 1) Start webcam on THIS device (browser)
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+
+        // 2) Start recording session on server
+        const startRec = await api.post(`/recordings/start/${cls._id}`, {}, { headers: { Authorization: token } });
+        const sessionId = startRec.data?.session_id;
+        if (!sessionId) throw new Error('Recording session not created');
+
+        // 3) MediaRecorder uploads chunks periodically
+        const recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8,opus' });
+        recorder.ondataavailable = async (e) => {
+          if (!e.data || e.data.size === 0) return;
+          try {
+            const form = new FormData();
+            form.append('chunk', e.data, `chunk_${Date.now()}.webm`);
+            await api.post(`/recordings/chunk/${sessionId}`, form, {
+              headers: { Authorization: token, 'Content-Type': 'multipart/form-data' },
+              timeout: 60000
+            });
+          } catch (err) {
+            console.error('Chunk upload failed', err);
+          }
+        };
+        recorder.start(2000); // 2s chunks
+
+        // 4) Send snapshots for focus scoring (no full video processing needed)
+        const videoEl = document.getElementById(`preview_${cls._id}`);
+        if (videoEl) {
+          videoEl.srcObject = stream;
+          videoEl.muted = true;
+          await videoEl.play().catch(() => {});
+        }
+
+        const canvas = document.createElement('canvas');
+        const timerId = setInterval(async () => {
+          try {
+            const v = videoEl;
+            if (!v || v.readyState < 2) return;
+            canvas.width = v.videoWidth || 640;
+            canvas.height = v.videoHeight || 480;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+            const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.7));
+            if (!blob) return;
+            const form = new FormData();
+            form.append('image', blob, `snap_${Date.now()}.jpg`);
+            await api.post(`/snapshot/${cls._id}`, form, {
+              headers: { Authorization: token, 'Content-Type': 'multipart/form-data' },
+              timeout: 30000
+            });
+            // refresh chart periodically
+            fetchHistory(cls._id);
+          } catch (err) {
+            console.error('Snapshot upload failed', err);
+          }
+        }, 5000); // every 5s
+
+        setRecordingSessions(prev => ({ ...prev, [cls._id]: sessionId }));
+        setMediaStreams(prev => ({ ...prev, [cls._id]: stream }));
+        setMediaRecorders(prev => ({ ...prev, [cls._id]: recorder }));
+        setSnapshotTimers(prev => ({ ...prev, [cls._id]: timerId }));
+
+        setStatusMessage('✅ Tracking started on this device. Recording + focus updates running...');
         if (cls.meeting_url) {
           window.open(cls.meeting_url, '_blank', 'noopener,noreferrer');
           setTimeout(() => {
-            setStatusMessage('✅ Meeting opened & camera tracking active! Press "Stop Tracking" when done.');
+            setStatusMessage('✅ Meeting opened. Camera recording + focus updates active. Press "Stop Tracking" when done.');
           }, 1000);
         } else {
-          setStatusMessage('✅ Tracking started successfully! Your focus is being monitored.');
+          setStatusMessage('✅ Tracking started successfully! Your focus is being monitored and video is recording.');
         }
       }
     } catch (error) {
@@ -141,13 +205,31 @@ const StudentDashboard = () => {
     try {
       setStatusMessage('⏹ Stopping tracking...');
       const token = localStorage.getItem('token');
-      
-      await api.post(`/stop-tracking/${cls._id}`, {}, { 
-        headers: { Authorization: token } 
-      });
+
+      // Stop snapshot timer
+      const timerId = snapshotTimers[cls._id];
+      if (timerId) clearInterval(timerId);
+
+      // Stop recorder
+      const recorder = mediaRecorders[cls._id];
+      if (recorder && recorder.state !== 'inactive') {
+        recorder.stop();
+      }
+
+      // Stop stream tracks
+      const stream = mediaStreams[cls._id];
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+      }
+
+      // Tell server to close session
+      const sessionId = recordingSessions[cls._id];
+      if (sessionId) {
+        await api.post(`/recordings/stop/${sessionId}`, {}, { headers: { Authorization: token } });
+      }
       
       setTrackingStatus(prev => ({ ...prev, [cls._id]: false }));
-      setStatusMessage('✅ Tracking stopped. Your focus data has been saved.');
+      setStatusMessage('✅ Tracking stopped. Your focus + video recording have been saved.');
     } catch (error) {
       const errorMsg = error.response?.data?.error || error.message || 'Failed to stop tracking';
       setStatusMessage(`⚠ ${errorMsg}`);
@@ -244,6 +326,12 @@ const StudentDashboard = () => {
                   <p>{new Date(cls.start_time).toLocaleString()}</p>
                   {cls.status === 'active' && (
                     <div>
+                      <video
+                        id={`preview_${cls._id}`}
+                        style={{ width: '100%', maxHeight: 220, borderRadius: 12, marginTop: 10, background: '#111' }}
+                        playsInline
+                        autoPlay
+                      />
                       {trackingStatus[cls._id] ? (
                         <div className="tracking-controls">
                           <div className="tracking-active">

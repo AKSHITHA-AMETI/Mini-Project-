@@ -22,6 +22,16 @@ const TeacherDashboard = () => {
     fetchClasses();
   }, []);
 
+  // Auto-refresh selected class stats/history every 5 seconds
+  useEffect(() => {
+    if (!selectedClass) return;
+    const id = selectedClass._id;
+    const t = setInterval(() => {
+      fetchData(id).catch(() => {});
+    }, 5000);
+    return () => clearInterval(t);
+  }, [selectedClass?._id]);
+
   const fetchClasses = async () => {
     const token = localStorage.getItem('token');
     const response = await api.get('/classes', { headers: { Authorization: token } });

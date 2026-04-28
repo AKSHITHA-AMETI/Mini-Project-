@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timedelta
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
 from bson import ObjectId
@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 import subprocess
 import platform
 import ssl
+import sys
 
 # Load environment variables from .env file
 load_dotenv()
@@ -28,6 +29,14 @@ CORS(app, resources={
     }
 })
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'jwt-secret-key')
+
+# Track running focus-tracker subprocesses in this API process.
+# Note: This only controls trackers started via this server instance.
+tracking_processes = {}  # class_id -> subprocess.Popen
+
+# Video recording storage (uploaded from student browsers)
+RECORDINGS_DIR = os.getenv("FOCUS_RECORDINGS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
+os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
 @app.route('/', methods=['GET'])
 def index():
@@ -647,90 +656,319 @@ def get_stats(class_id):
 # ================= START TRACKING =================
 @app.route('/start-tracking/<class_id>', methods=['POST'])
 def start_tracking(class_id):
-    print(f"[{datetime.now(ist)}] START-TRACKING called for class {class_id}")
-    
     user = get_current_user()
+
     if not user or user['role'] != 'student':
-        print(f"[{datetime.now(ist)}] Unauthorized: user={user}, role={user.get('role') if user else 'None'}")
         return jsonify({'error': 'Unauthorized'}), 403
 
     cls = db.classes.find_one({'_id': ObjectId(class_id)})
     if not cls:
-        print(f"[{datetime.now(ist)}] Class not found: {class_id}")
         return jsonify({'error': 'Class not found'}), 404
 
     if user['email'] not in cls.get('student_emails', []):
-        print(f"[{datetime.now(ist)}] User not in class: {user['email']} not in {cls.get('student_emails', [])}")
-        return jsonify({'error': 'You must join the class before tracking'}), 403
+        return jsonify({'error': 'Join class first'}), 403
 
     if cls.get('status') != 'active':
-        print(f"[{datetime.now(ist)}] Class not active: status={cls.get('status')}")
-        return jsonify({'error': 'Class is not active'}), 400
+        return jsonify({'error': 'Class not active'}), 400
+
+    # Camera must run on the student's device (browser). This endpoint just authorizes tracking.
+    return jsonify({'message': 'Tracking allowed'}), 200
+
+
+# ================= SNAPSHOT (BROWSER -> SERVER) =================
+@app.route('/snapshot/<class_id>', methods=['POST'])
+def upload_snapshot(class_id):
+    """
+    Accept periodic snapshots from student browser, compute focus score server-side,
+    and store as frames for live dashboards.
+    """
+    user = get_current_user()
+    if not user or user.get('role') != 'student':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    cls = db.classes.find_one({'_id': ObjectId(class_id)})
+    if not cls:
+        return jsonify({'error': 'Class not found'}), 404
+
+    if user['email'] not in cls.get('student_emails', []):
+        return jsonify({'error': 'Join class first'}), 403
+
+    if 'image' not in request.files:
+        return jsonify({'error': 'image file is required (multipart/form-data)'}), 400
 
     try:
-        # Get the token from the Authorization header
-        token = request.headers.get('Authorization', '')
-        print(f"[{datetime.now(ist)}] Token length: {len(token)}")
-        
-        # Get the directory where server.py is located
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        print(f"[{datetime.now(ist)}] Base dir: {base_dir}")
-        
-        # Create a log file for tracking subprocess
-        log_file_path = os.path.join(base_dir, f'tracking_{class_id}.log')
-        print(f"[{datetime.now(ist)}] Log file: {log_file_path}")
-        
-        try:
-            # Windows environment setup
-            env = os.environ.copy()
-            env['FOCUS_API_URL'] = 'http://localhost:5000'
-            
-            # Build command
-            if platform.system() == 'Windows':
-                cmd = ['python', 'main.py', class_id, token, '--headless']
-            else:
-                cmd = ['python3', 'main.py', class_id, token, '--headless']
-            
-            print(f"[{datetime.now(ist)}] Launching subprocess: {' '.join(cmd[:3])}... in {base_dir}")
-            
-            # Launch tracking with proper file handling
-            with open(log_file_path, 'a') as log_file:
-                log_file.write(f"\n{'='*60}\n")
-                log_file.write(f"Started at: {datetime.now(ist)}\n")
-                log_file.write(f"Student: {user['email']}\n")
-                log_file.write(f"Class ID: {class_id}\n")
-                log_file.write(f"Command: {' '.join(cmd)}\n")
-                log_file.write(f"Working dir: {base_dir}\n")
-                log_file.write(f"{'='*60}\n\n")
-                log_file.flush()
-                
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=base_dir,
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    env=env,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if platform.system() == 'Windows' else 0
-                )
-            
-            print(f"[{datetime.now(ist)}] Subprocess PID: {proc.pid}")
-            print(f"[{datetime.now(ist)}] Log file: {log_file_path}")
-            
-            return jsonify({'message': 'Tracking started successfully', 'pid': proc.pid, 'log_file': log_file_path}), 200
-            
-        except Exception as subprocess_error:
-            error_msg = str(subprocess_error)
-            print(f"[{datetime.now(ist)}] Subprocess error: {error_msg}")
-            
-            # Write error to log file for debugging
-            with open(log_file_path, 'a') as log_file:
-                log_file.write(f"ERROR: {error_msg}\n")
-            
-            return jsonify({'error': f'Subprocess error: {error_msg}'}), 500
-            
+        # Lazy heavy imports
+        import numpy as np
+        import cv2
+        from utils.face_detection import detect_faces
+        from utils.gaze_tracking import estimate_gaze
+        from utils.head_pose import estimate_head_pose
+        from utils.yawn_detection import estimate_yawn
+        from utils.laugh_detection import estimate_laugh
+        from utils.focus_score import compute_focus_score
+
+        f = request.files['image']
+        image_bytes = f.read()
+        arr = np.frombuffer(image_bytes, dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            return jsonify({'error': 'Failed to decode image'}), 400
+
+        face_detections = detect_faces(frame)
+        gaze = estimate_gaze(frame)
+        head_direction = estimate_head_pose(frame)
+        yawning, mouth_distance = estimate_yawn(frame)
+        laughing, mouth_width, mouth_height = estimate_laugh(frame)
+
+        focus_score = compute_focus_score(
+            gaze, head_direction, yawning, laughing,
+            mouth_distance, mouth_width, mouth_height
+        )
+
+        payload = {
+            "timestamp": datetime.now(ist).isoformat(),
+            "class_id": class_id,
+            "student_email": user['email'],
+            "student_id": user.get('student_id'),
+            "gaze": gaze,
+            "head_direction": head_direction,
+            "yawning": bool(yawning),
+            "mouth_distance": float(mouth_distance),
+            "laughing": bool(laughing),
+            "mouth_width": float(mouth_width),
+            "mouth_height": float(mouth_height),
+            "focus_score": float(focus_score),
+            "faces_detected": len(face_detections),
+            "source": "browser_snapshot",
+        }
+        db.frames.insert_one(payload)
+
+        return jsonify({"message": "Snapshot processed", "focus_score": float(focus_score)}), 201
     except Exception as e:
-        print(f"[{datetime.now(ist)}] Error starting tracking: {e}")
-        return jsonify({'error': f'Failed to start tracking: {str(e)}'}), 500
+        print(f"[{datetime.now(ist)}] Snapshot error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# ================= VIDEO RECORDING (BROWSER -> SERVER) =================
+@app.route('/recordings/start/<class_id>', methods=['POST'])
+def recordings_start(class_id):
+    user = get_current_user()
+    if not user or user.get('role') != 'student':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    cls = db.classes.find_one({'_id': ObjectId(class_id)})
+    if not cls:
+        return jsonify({'error': 'Class not found'}), 404
+    if user['email'] not in cls.get('student_emails', []):
+        return jsonify({'error': 'Join class first'}), 403
+
+    now = datetime.now(ist).isoformat()
+    session = {
+        "class_id": class_id,
+        "student_email": user['email'],
+        "student_id": user.get('student_id'),
+        "started_at": now,
+        "ended_at": None,
+        "status": "recording",
+        "allowed_teacher_emails": [],
+        "chunk_count": 0,
+    }
+    res = db.recording_sessions.insert_one(session)
+    session_id = str(res.inserted_id)
+
+    # Store a single webm file; browser uploads chunks which we append.
+    class_dir = os.path.join(RECORDINGS_DIR, class_id)
+    student_dir = os.path.join(class_dir, user['email'].replace("@", "_at_"))
+    os.makedirs(student_dir, exist_ok=True)
+    file_path = os.path.join(student_dir, f"{session_id}.webm")
+    db.recording_sessions.update_one({"_id": ObjectId(session_id)}, {"$set": {"file_path": file_path}})
+
+    return jsonify({"session_id": session_id}), 201
+
+
+@app.route('/recordings/chunk/<session_id>', methods=['POST'])
+def recordings_chunk(session_id):
+    user = get_current_user()
+    if not user or user.get('role') != 'student':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    session = db.recording_sessions.find_one({"_id": ObjectId(session_id)})
+    if not session:
+        return jsonify({'error': 'Recording session not found'}), 404
+    if session.get("student_email") != user.get("email"):
+        return jsonify({'error': 'Unauthorized'}), 403
+    if session.get("status") != "recording":
+        return jsonify({'error': 'Session not recording'}), 400
+
+    if 'chunk' not in request.files:
+        return jsonify({'error': 'chunk file is required (multipart/form-data)'}), 400
+
+    file_path = session.get("file_path")
+    if not file_path:
+        return jsonify({'error': 'Session missing file_path'}), 500
+
+    try:
+        data = request.files['chunk'].read()
+        with open(file_path, "ab") as out:
+            out.write(data)
+
+        db.recording_sessions.update_one(
+            {"_id": ObjectId(session_id)},
+            {"$inc": {"chunk_count": 1}, "$set": {"last_chunk_at": datetime.now(ist).isoformat()}}
+        )
+        return jsonify({"message": "Chunk received"}), 201
+    except Exception as e:
+        print(f"[{datetime.now(ist)}] Chunk upload error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/recordings/stop/<session_id>', methods=['POST'])
+def recordings_stop(session_id):
+    user = get_current_user()
+    if not user or user.get('role') != 'student':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    session = db.recording_sessions.find_one({"_id": ObjectId(session_id)})
+    if not session:
+        return jsonify({'error': 'Recording session not found'}), 404
+    if session.get("student_email") != user.get("email"):
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    db.recording_sessions.update_one(
+        {"_id": ObjectId(session_id)},
+        {"$set": {"status": "stopped", "ended_at": datetime.now(ist).isoformat()}}
+    )
+    return jsonify({"message": "Recording stopped"}), 200
+
+
+# ================= ADMIN: LIST/VIEW RECORDINGS =================
+@app.route('/admin/recordings', methods=['GET'])
+def admin_list_recordings():
+    user = get_current_user()
+    if not user or user.get('role') != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    class_id = request.args.get("class_id")
+    q = {}
+    if class_id:
+        q["class_id"] = class_id
+
+    sessions = list(db.recording_sessions.find(q).sort("_id", -1).limit(200))
+    for s in sessions:
+        s["_id"] = str(s["_id"])
+        # Don't expose full disk path to UI
+        s.pop("file_path", None)
+    return jsonify({"sessions": sessions}), 200
+
+
+@app.route('/admin/recordings/<session_id>/video', methods=['GET'])
+def admin_get_recording_video(session_id):
+    user = get_current_user()
+    if not user or user.get('role') != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    session = db.recording_sessions.find_one({"_id": ObjectId(session_id)})
+    if not session:
+        return jsonify({'error': 'Recording session not found'}), 404
+
+    file_path = session.get("file_path")
+    if not file_path or not os.path.exists(file_path):
+        return jsonify({'error': 'Video file not found'}), 404
+
+    return send_file(file_path, mimetype="video/webm", conditional=True)
+
+
+# ================= TEACHER: REQUEST RECORDING + VIEW IF APPROVED =================
+@app.route('/teacher/recordings/request/<session_id>', methods=['POST'])
+def teacher_request_recording(session_id):
+    user = get_current_user()
+    if not user or user.get('role') != 'teacher':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    session = db.recording_sessions.find_one({"_id": ObjectId(session_id)})
+    if not session:
+        return jsonify({'error': 'Recording session not found'}), 404
+
+    cls = db.classes.find_one({'_id': ObjectId(session.get("class_id"))})
+    if not cls or cls.get('teacher_email') != user.get('email'):
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    reason = (request.get_json() or {}).get("reason", "").strip()
+    req = {
+        "session_id": session_id,
+        "class_id": session.get("class_id"),
+        "teacher_email": user.get("email"),
+        "reason": reason,
+        "status": "pending",
+        "requested_at": datetime.now(ist).isoformat(),
+        "approved_at": None,
+    }
+    db.recording_requests.insert_one(req)
+    return jsonify({"message": "Request submitted"}), 201
+
+
+@app.route('/admin/recordings/requests', methods=['GET'])
+def admin_list_recording_requests():
+    user = get_current_user()
+    if not user or user.get('role') != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    items = list(db.recording_requests.find({}).sort("_id", -1).limit(200))
+    for it in items:
+        it["_id"] = str(it["_id"])
+    return jsonify({"requests": items}), 200
+
+
+@app.route('/admin/recordings/approve/<request_id>', methods=['POST'])
+def admin_approve_recording_request(request_id):
+    user = get_current_user()
+    if not user or user.get('role') != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    req = db.recording_requests.find_one({"_id": ObjectId(request_id)})
+    if not req:
+        return jsonify({'error': 'Request not found'}), 404
+
+    if req.get("status") != "pending":
+        return jsonify({'error': 'Request already processed'}), 400
+
+    session_id = req.get("session_id")
+    teacher_email = req.get("teacher_email")
+
+    db.recording_sessions.update_one(
+        {"_id": ObjectId(session_id)},
+        {"$addToSet": {"allowed_teacher_emails": teacher_email}}
+    )
+    db.recording_requests.update_one(
+        {"_id": ObjectId(request_id)},
+        {"$set": {"status": "approved", "approved_at": datetime.now(ist).isoformat()}}
+    )
+
+    return jsonify({"message": "Approved"}), 200
+
+
+@app.route('/teacher/recordings/<session_id>/video', methods=['GET'])
+def teacher_get_recording_video(session_id):
+    user = get_current_user()
+    if not user or user.get('role') != 'teacher':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    session = db.recording_sessions.find_one({"_id": ObjectId(session_id)})
+    if not session:
+        return jsonify({'error': 'Recording session not found'}), 404
+
+    cls = db.classes.find_one({'_id': ObjectId(session.get("class_id"))})
+    if not cls or cls.get('teacher_email') != user.get('email'):
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    if user.get("email") not in session.get("allowed_teacher_emails", []):
+        return jsonify({'error': 'Not approved by admin'}), 403
+
+    file_path = session.get("file_path")
+    if not file_path or not os.path.exists(file_path):
+        return jsonify({'error': 'Video file not found'}), 404
+
+    return send_file(file_path, mimetype="video/webm", conditional=True)
 
 # ================= TRACKING LOGS =================
 @app.route('/tracking-logs/<class_id>', methods=['GET'])
@@ -832,19 +1070,30 @@ def stop_tracking(class_id):
             with open(log_file, 'a') as f:
                 f.write(f"\n[{datetime.now(ist)}] STOP signal received\n")
         
-        # On Windows, try to kill process using taskill
-        if platform.system() == 'Windows':
+        # Prefer terminating only the process we started for this class.
+        proc = tracking_processes.get(class_id)
+        if proc is not None and proc.poll() is None:
             try:
-                # Find and kill python processes running main.py for this class
-                os.system(f'taskkill /F /IM python.exe /T 2>nul')
-            except:
-                pass
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            tracking_processes[class_id] = None
         else:
-            # On Linux/Mac
-            try:
-                os.system(f'pkill -f "main.py.*{class_id}"')
-            except:
-                pass
+            # Fallback best-effort cleanup (older behavior) if we don't have a handle.
+            if platform.system() == 'Windows':
+                try:
+                    os.system('taskkill /F /IM python.exe /T 2>nul')
+                except Exception:
+                    pass
+            else:
+                try:
+                    os.system(f'pkill -f "main.py.*{class_id}"')
+                except Exception:
+                    pass
         
         print(f"[{datetime.now(ist)}] Tracking stopped for class {class_id}")
         
