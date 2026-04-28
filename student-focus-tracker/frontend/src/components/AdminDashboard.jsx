@@ -4,6 +4,9 @@ import './Dashboard.css';
 
 const AdminDashboard = () => {
   const [summary, setSummary] = useState(null);
+  const [recordings, setRecordings] = useState([]);
+  const [requests, setRequests] = useState([]);
+  const [selectedSession, setSelectedSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [user] = useState(JSON.parse(localStorage.getItem('user') || 'null'));
 
@@ -12,10 +15,14 @@ const AdminDashboard = () => {
       try {
         setLoading(true);
         const token = localStorage.getItem('token');
-        const response = await api.get('/admin/dashboard', {
-          headers: { Authorization: token }
-        });
-        setSummary(response.data);
+        const [summaryRes, recRes, reqRes] = await Promise.all([
+          api.get('/admin/dashboard', { headers: { Authorization: token } }),
+          api.get('/admin/recordings', { headers: { Authorization: token } }).catch(() => ({ data: { sessions: [] } })),
+          api.get('/admin/recordings/requests', { headers: { Authorization: token } }).catch(() => ({ data: { requests: [] } }))
+        ]);
+        setSummary(summaryRes.data);
+        setRecordings(recRes.data?.sessions || []);
+        setRequests(reqRes.data?.requests || []);
       } catch (error) {
         console.error('Failed to load admin dashboard', error);
       } finally {
@@ -24,6 +31,17 @@ const AdminDashboard = () => {
     };
     fetchSummary();
   }, []);
+
+  const approveRequest = async (requestId) => {
+    try {
+      const token = localStorage.getItem('token');
+      await api.post(`/admin/recordings/approve/${requestId}`, {}, { headers: { Authorization: token } });
+      const reqRes = await api.get('/admin/recordings/requests', { headers: { Authorization: token } });
+      setRequests(reqRes.data?.requests || []);
+    } catch (e) {
+      console.error('Approve failed', e);
+    }
+  };
 
   if (loading) {
     return (
@@ -164,6 +182,63 @@ const AdminDashboard = () => {
             </div>
           ) : (
             <p>No teachers have created classes yet.</p>
+          )}
+        </section>
+
+        <section className="stats-section admin-stats">
+          <h2>🎥 Video Recordings</h2>
+          {recordings.length === 0 ? (
+            <div className="empty-card">No recordings uploaded yet.</div>
+          ) : (
+            <div className="classes-grid">
+              {recordings.map((s) => (
+                <div key={s._id} className="class-card" onClick={() => setSelectedSession(s)}>
+                  <h3>{s.student_email}</h3>
+                  <p>Class: {s.class_id}</p>
+                  <p>Status: {s.status}</p>
+                  <p>Chunks: {s.chunk_count || 0}</p>
+                  <p>Started: {s.started_at ? new Date(s.started_at).toLocaleString() : '-'}</p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {selectedSession && (
+            <div style={{ marginTop: 16 }}>
+              <h3>Playback (Admin)</h3>
+              <video
+                controls
+                style={{ width: '100%', maxHeight: 420, borderRadius: 12, background: '#111' }}
+                src={`${api.defaults.baseURL}/admin/recordings/${selectedSession._id}/video`}
+              />
+            </div>
+          )}
+        </section>
+
+        <section className="stats-section admin-stats">
+          <h2>📨 Teacher Recording Requests</h2>
+          {requests.length === 0 ? (
+            <div className="empty-card">No requests.</div>
+          ) : (
+            <div className="attendance-list">
+              {requests.map((r) => (
+                <div key={r._id} className="attendance-item">
+                  <div>
+                    <strong>{r.teacher_email}</strong> requested session <code>{r.session_id}</code>
+                    <div style={{ opacity: 0.8, marginTop: 6 }}>
+                      Reason: {r.reason || '(none)'} | Status: {r.status}
+                    </div>
+                  </div>
+                  <div>
+                    {r.status === 'pending' && (
+                      <button className="action-btn" onClick={() => approveRequest(r._id)}>
+                        Approve
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
           )}
         </section>
       </div>
