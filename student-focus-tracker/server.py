@@ -2,6 +2,7 @@ import os
 from datetime import datetime, timedelta
 from flask import Flask, jsonify, request
 from pymongo import MongoClient
+from pymongo.errors import ServerSelectionTimeoutError
 from bson import ObjectId
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_mail import Mail, Message
@@ -11,6 +12,7 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import subprocess
 import platform
+import ssl
 
 # Load environment variables from .env file
 load_dotenv()
@@ -50,6 +52,23 @@ def index():
         ]
     }), 200
 
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check endpoint to verify API and database connectivity"""
+    try:
+        client.admin.command('ismaster')
+        db_status = 'connected'
+    except Exception as e:
+        db_status = f'disconnected: {str(e)}'
+    
+    return jsonify({
+        'status': 'ok',
+        'api': 'running',
+        'database': db_status,
+        'server_ip': request.remote_addr,
+        'server_host': request.host
+    }), 200
+
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({'error': 'Endpoint not found', 'message': 'Use /register, /login, /classes, etc.'}), 404
@@ -75,7 +94,30 @@ def verify_token(token):
 # ================= DB =================
 # Use MongoDB Atlas (cloud) or local MongoDB
 MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
-client = MongoClient(MONGODB_URI)
+
+# If it's MongoDB Atlas, add SSL bypass to connection string
+if 'mongodb+srv://' in MONGODB_URI and '&tlsInsecure=' not in MONGODB_URI:
+    MONGODB_URI = MONGODB_URI + ('&' if '?' in MONGODB_URI else '?') + 'tlsInsecure=true'
+
+try:
+    client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000, connectTimeoutMS=10000)
+    # Test the connection
+    client.admin.command('ismaster')
+    print("[SUCCESS] MongoDB connected successfully")
+except ServerSelectionTimeoutError as e:
+    print(f"[WARNING] MongoDB connection timeout - retrying without timeout...")
+    try:
+        # Try again without strict timeout for initial connection
+        client = MongoClient(MONGODB_URI)
+        print("[SUCCESS] MongoDB connected (with extended timeout)")
+    except Exception as e2:
+        print(f"[ERROR] MongoDB connection failed: {e2}")
+        client = MongoClient(MONGODB_URI)
+except Exception as e:
+    print(f"[ERROR] MongoDB connection error: {e}")
+    print("[INFO] Attempting fallback connection...")
+    client = MongoClient(MONGODB_URI)
+
 db = client['student_focus_tracker']
 
 # ================= Mail =================
@@ -100,49 +142,106 @@ def get_current_user():
 # ================= REGISTER =================
 @app.route('/register', methods=['POST'])
 def register():
-    data = request.get_json()
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Request body is required'}), 400
 
-    email = data.get('email')
-    password = data.get('password')
-    role = data.get('role')
-    name = data.get('name')
-    class_name = data.get('class_name') if role == 'student' else None
-    student_id = data.get('student_id') if role == 'student' else None
-    secret_code = data.get('secret_code')
+        email = data.get('email', '').strip()
+        password = data.get('password', '').strip()
+        role = data.get('role', '').strip()
+        name = data.get('name', '').strip()
+        class_name = data.get('class_name', '') if role == 'student' else None
+        student_id = data.get('student_id', '').strip() if role == 'student' else None
+        secret_code = data.get('secret_code', '').strip()
 
-    if not all([email, password, role, name]):
-        return jsonify({'error': 'Missing fields'}), 400
+        # Validate required fields
+        if not all([email, password, role, name]):
+            missing = []
+            if not email:
+                missing.append('email')
+            if not password:
+                missing.append('password')
+            if not role:
+                missing.append('role')
+            if not name:
+                missing.append('name')
+            return jsonify({'error': f'Missing required fields: {", ".join(missing)}'}), 400
 
-    if role in ['teacher', 'admin']:
-        expected_code = app.config['TEACHER_REG_CODE'] if role == 'teacher' else app.config['ADMIN_REG_CODE']
-        if secret_code != expected_code:
-            return jsonify({'error': 'Invalid registration secret for role'}), 403
+        # Validate email format
+        if '@' not in email or '.' not in email:
+            return jsonify({'error': 'Invalid email format'}), 400
 
-    if db.users.find_one({'email': email}):
-        return jsonify({'error': 'User exists'}), 400
+        # Validate password length
+        if len(password) < 6:
+            return jsonify({'error': 'Password must be at least 6 characters'}), 400
 
-    db.users.insert_one({
-        'email': email,
-        'password': generate_password_hash(password),
-        'role': role,
-        'name': name,
-        'class_name': class_name,
-        'student_id': student_id
-    })
+        # Validate role
+        if role not in ['student', 'teacher', 'admin']:
+            return jsonify({'error': 'Invalid role. Must be student, teacher, or admin'}), 400
 
-    return jsonify({'message': 'Registered'}), 201
+        # Check secret code for teacher and admin
+        if role in ['teacher', 'admin']:
+            expected_code = app.config['TEACHER_REG_CODE'] if role == 'teacher' else app.config['ADMIN_REG_CODE']
+            if not secret_code:
+                return jsonify({'error': f'{role.capitalize()} registration code is required'}), 400
+            if secret_code != expected_code:
+                return jsonify({'error': f'Invalid {role} registration code'}), 403
+
+        # Check if user already exists
+        if db.users.find_one({'email': email}):
+            return jsonify({'error': 'User with this email already exists'}), 409
+
+        # Create user document
+        user_doc = {
+            'email': email,
+            'password': generate_password_hash(password),
+            'role': role,
+            'name': name,
+            'created_at': datetime.now(ist).isoformat()
+        }
+
+        if role == 'student':
+            user_doc['class_name'] = class_name
+            user_doc['student_id'] = student_id
+
+        result = db.users.insert_one(user_doc)
+
+        return jsonify({
+            'message': 'Registration successful',
+            'user_id': str(result.inserted_id)
+        }), 201
+
+    except Exception as e:
+        print(f"Register error: {e}")
+        return jsonify({'error': 'Registration failed. Please try again.'}), 500
 
 # ================= LOGIN =================
 @app.route('/login', methods=['POST'])
 def login():
-    data = request.get_json()
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Request body is required'}), 400
 
-    user = db.users.find_one({'email': data.get('email')})
-    if user and check_password_hash(user['password'], data.get('password')):
+        email = data.get('email', '').strip()
+        password = data.get('password', '')
+
+        if not email or not password:
+            return jsonify({'error': 'Email and password are required'}), 400
+
+        user = db.users.find_one({'email': email})
+        if not user:
+            return jsonify({'error': 'Invalid email or password'}), 401
+
+        if not check_password_hash(user['password'], password):
+            return jsonify({'error': 'Invalid email or password'}), 401
+
         token = generate_token(str(user['_id']))
         return jsonify({
             'token': token,
             'user': {
+                'id': str(user['_id']),
                 'email': user['email'],
                 'name': user['name'],
                 'role': user['role'],
@@ -150,7 +249,9 @@ def login():
             }
         }), 200
 
-    return jsonify({'error': 'Invalid credentials'}), 401
+    except Exception as e:
+        print(f"Login error: {e}")
+        return jsonify({'error': 'Login failed. Please try again.'}), 500
 
 # ================= CREATE CLASS =================
 @app.route('/classes', methods=['POST'])
