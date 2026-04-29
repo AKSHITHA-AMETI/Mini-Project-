@@ -13,6 +13,7 @@ const TeacherDashboard = () => {
   const [attendance, setAttendance] = useState([]);
   const [history, setHistory] = useState([]);
   const [multiDeviceStats, setMultiDeviceStats] = useState(null);
+  const [recordingSessions, setRecordingSessions] = useState([]);
   const [newClass, setNewClass] = useState({ class_name: '', start_time: '', end_time: '', meeting_url: '' });
   const [errors, setErrors] = useState('');
   const [statusMessage, setStatusMessage] = useState('');
@@ -40,11 +41,12 @@ const TeacherDashboard = () => {
 
   const fetchData = async (classId) => {
     const token = localStorage.getItem('token');
-    const [statsRes, attendanceRes, historyRes, multiDeviceRes] = await Promise.all([
+    const [statsRes, attendanceRes, historyRes, multiDeviceRes, recordingsRes] = await Promise.all([
       api.get(`/stats/${classId}`, { headers: { Authorization: token } }),
       api.get(`/attendance/${classId}`, { headers: { Authorization: token } }),
       api.get(`/history/${classId}`, { headers: { Authorization: token } }),
-      api.get(`/multi-device-stats/${classId}`, { headers: { Authorization: token } }).catch(() => ({ data: null })) // Fallback for backward compatibility
+      api.get(`/multi-device-stats/${classId}`, { headers: { Authorization: token } }).catch(() => ({ data: null })), // Fallback for backward compatibility
+      api.get(`/teacher/recordings/${classId}`, { headers: { Authorization: token } }).catch(() => ({ data: { sessions: [] } }))
     ]);
     setStats(statsRes.data);
     setAttendance(attendanceRes.data);
@@ -53,6 +55,21 @@ const TeacherDashboard = () => {
     // Set multi-device stats if available
     if (multiDeviceRes.data) {
       setMultiDeviceStats(multiDeviceRes.data);
+    }
+    setRecordingSessions(recordingsRes.data?.sessions || []);
+  };
+
+  const requestRecordingFromAdmin = async (sessionId) => {
+    try {
+      const token = localStorage.getItem('token');
+      const reason = window.prompt('Reason for requesting this recording (optional):', 'Review student engagement for this class') || '';
+      await api.post(`/teacher/recordings/request/${sessionId}`, { reason }, { headers: { Authorization: token } });
+      setStatusMessage('Recording request sent to admin.');
+      if (selectedClass?._id) {
+        fetchData(selectedClass._id);
+      }
+    } catch (err) {
+      setStatusMessage(err.response?.data?.error || 'Failed to submit recording request');
     }
   };
 
@@ -338,6 +355,49 @@ const TeacherDashboard = () => {
               <h2>📈 Focus Trend</h2>
               <div className="chart-container">
                 <Line data={chartData} options={chartOptions} />
+              </div>
+            </section>
+
+            <section className="attendance-section">
+              <h2>🎥 Student Recordings</h2>
+              <div className="attendance-list">
+                {recordingSessions.length === 0 ? (
+                  <div className="empty-card">No recordings uploaded yet for this class.</div>
+                ) : recordingSessions.map((session) => (
+                  <div key={session._id} className="attendance-item">
+                    <div>
+                      <strong>{session.student_email}</strong>
+                      <div className="attendance-details">
+                        <span>Session: {session._id}</span>
+                        <span>Status: {session.status}</span>
+                        <span>Chunks: {session.chunk_count || 0}</span>
+                        <span>Started: {session.started_at ? new Date(session.started_at).toLocaleString() : '-'}</span>
+                        <span>Request: {session.request_status || (session.can_view ? 'approved' : 'not requested')}</span>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      {!session.can_view ? (
+                        <button
+                          type="button"
+                          className="action-btn"
+                          onClick={() => requestRecordingFromAdmin(session._id)}
+                          disabled={session.request_status === 'pending'}
+                        >
+                          {session.request_status === 'pending' ? 'Request Pending' : 'Request from Admin'}
+                        </button>
+                      ) : (
+                        <a
+                          className="action-btn"
+                          href={`${api.defaults.baseURL}/teacher/recordings/${session._id}/video`}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          View Recording
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
             </section>
           </div>

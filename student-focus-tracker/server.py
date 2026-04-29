@@ -907,6 +907,33 @@ def teacher_request_recording(session_id):
     return jsonify({"message": "Request submitted"}), 201
 
 
+@app.route('/teacher/recordings/<class_id>', methods=['GET'])
+def teacher_list_recordings_for_class(class_id):
+    """List class recording sessions for class teacher with request/approval state."""
+    user = get_current_user()
+    if not user or user.get('role') != 'teacher':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    cls = db.classes.find_one({'_id': ObjectId(class_id)})
+    if not cls or cls.get('teacher_email') != user.get('email'):
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    sessions = list(db.recording_sessions.find({"class_id": class_id}).sort("_id", -1).limit(300))
+    for s in sessions:
+        sid = str(s["_id"])
+        latest_req = db.recording_requests.find_one(
+            {"session_id": sid, "teacher_email": user.get("email")},
+            sort=[("_id", -1)]
+        )
+        s["_id"] = sid
+        s["request_status"] = (latest_req or {}).get("status")
+        s["request_reason"] = (latest_req or {}).get("reason")
+        s["can_view"] = user.get("email") in s.get("allowed_teacher_emails", [])
+        s.pop("file_path", None)
+
+    return jsonify({"sessions": sessions}), 200
+
+
 @app.route('/admin/recordings/requests', methods=['GET'])
 def admin_list_recording_requests():
     user = get_current_user()

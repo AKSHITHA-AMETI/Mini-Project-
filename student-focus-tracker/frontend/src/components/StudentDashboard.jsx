@@ -236,6 +236,15 @@ const StudentDashboard = () => {
     }
   };
 
+  const joinMeeting = (cls) => {
+    if (!cls?.meeting_url) {
+      setStatusMessage('⚠ Meeting link is not available for this class yet.');
+      return;
+    }
+    window.open(cls.meeting_url, '_blank', 'noopener,noreferrer');
+    setStatusMessage('🔗 Meeting opened in a new tab.');
+  };
+
   const chartData = {
     labels: history.map((h) => new Date(h.timestamp).toLocaleTimeString()),
     datasets: [
@@ -324,6 +333,17 @@ const StudentDashboard = () => {
                   <p>Teacher: {cls.teacher_email}</p>
                   <p>Status: <span className={`status-${cls.status}`}>{cls.status}</span></p>
                   <p>{new Date(cls.start_time).toLocaleString()}</p>
+                  {cls.meeting_url ? (
+                    <button
+                      type="button"
+                      className="action-btn"
+                      onClick={(e) => { e.stopPropagation(); joinMeeting(cls); }}
+                    >
+                      🔗 Join Meeting
+                    </button>
+                  ) : (
+                    <p style={{ opacity: 0.8, marginTop: 8 }}>Meeting link not shared yet</p>
+                  )}
                   {cls.status === 'active' && (
                     <div>
                       <video
