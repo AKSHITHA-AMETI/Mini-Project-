@@ -10,47 +10,72 @@ const AdminDashboard = () => {
   const [loading, setLoading] = useState(true);
   const [user] = useState(JSON.parse(localStorage.getItem('user') || 'null'));
 
+  const fetchSummary = async (showLoader = false) => {
+    try {
+      if (showLoader) setLoading(true);
+      const token = localStorage.getItem('token');
+      const [summaryRes, recRes, reqRes] = await Promise.all([
+        api.get('/admin/dashboard', { headers: { Authorization: token } }),
+        api.get('/admin/recordings', { headers: { Authorization: token } }).catch(() => ({ data: { sessions: [] } })),
+        api.get('/admin/recordings/requests', { headers: { Authorization: token } }).catch(() => ({ data: { requests: [] } }))
+      ]);
+      setSummary(summaryRes.data);
+      setRecordings(recRes.data?.sessions || []);
+      setRequests(reqRes.data?.requests || []);
+    } catch (error) {
+      console.error('Failed to load admin dashboard', error);
+    } finally {
+      if (showLoader) setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const fetchSummary = async () => {
-      try {
-        setLoading(true);
-        const token = localStorage.getItem('token');
-        const [summaryRes, recRes, reqRes] = await Promise.all([
-          api.get('/admin/dashboard', { headers: { Authorization: token } }),
-          api.get('/admin/recordings', { headers: { Authorization: token } }).catch(() => ({ data: { sessions: [] } })),
-          api.get('/admin/recordings/requests', { headers: { Authorization: token } }).catch(() => ({ data: { requests: [] } }))
-        ]);
-        setSummary(summaryRes.data);
-        setRecordings(recRes.data?.sessions || []);
-        setRequests(reqRes.data?.requests || []);
-      } catch (error) {
-        console.error('Failed to load admin dashboard', error);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchSummary();
+    fetchSummary(true);
+    const timer = setInterval(() => fetchSummary(false), 5000);
+    return () => clearInterval(timer);
   }, []);
+
+  const pendingRequestCount = requests.filter((r) => r.status === 'pending').length;
+
+  const scrollToRequests = () => {
+    document.getElementById('teacher-recording-requests')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
 
   const approveRequest = async (requestId) => {
     try {
       const token = localStorage.getItem('token');
       await api.post(`/admin/recordings/approve/${requestId}`, {}, { headers: { Authorization: token } });
-      const reqRes = await api.get('/admin/recordings/requests', { headers: { Authorization: token } });
-      setRequests(reqRes.data?.requests || []);
+      await fetchSummary(false);
     } catch (e) {
       console.error('Approve failed', e);
     }
   };
 
+  const renderHeader = () => (
+    <header className="dashboard-header">
+      <div className="admin-header-top">
+        <h1>🛠️ Admin Dashboard</h1>
+        {pendingRequestCount > 0 && (
+          <button
+            type="button"
+            className="admin-pending-badge"
+            onClick={scrollToRequests}
+            title="View pending teacher recording requests"
+          >
+            Pending recording requests:
+            <span className="admin-pending-badge-count">{pendingRequestCount}</span>
+          </button>
+        )}
+      </div>
+      <p>Welcome, {user?.name}!</p>
+      <button className="logout-btn" onClick={() => { localStorage.clear(); window.location.href = '/'; }}>Logout</button>
+    </header>
+  );
+
   if (loading) {
     return (
       <div className="dashboard-container">
-        <header className="dashboard-header">
-          <h1>🛠️ Admin Dashboard</h1>
-          <p>Welcome, {user?.name}!</p>
-          <button className="logout-btn" onClick={() => { localStorage.clear(); window.location.href = '/'; }}>Logout</button>
-        </header>
+        {renderHeader()}
         <div className="dashboard-content">
           <p>Loading system statistics...</p>
         </div>
@@ -60,11 +85,7 @@ const AdminDashboard = () => {
 
   return (
     <div className="dashboard-container">
-      <header className="dashboard-header">
-        <h1>🛠️ Admin Dashboard</h1>
-        <p>Welcome, {user?.name}!</p>
-        <button className="logout-btn" onClick={() => { localStorage.clear(); window.location.href = '/'; }}>Logout</button>
-      </header>
+      {renderHeader()}
 
       <div className="dashboard-content">
         {/* System Users Stats */}
@@ -120,6 +141,9 @@ const AdminDashboard = () => {
         {/* Tracking Statistics */}
         <section className="stats-section admin-stats">
           <h2>📊 Focus Tracking Statistics</h2>
+          <p style={{ opacity: 0.8, marginBottom: 12 }}>
+            Updates every 5 seconds while students run tracking on an active class.
+          </p>
           {summary?.tracking_stats && (
             <div>
               <div className="stats-grid">
@@ -215,8 +239,13 @@ const AdminDashboard = () => {
           )}
         </section>
 
-        <section className="stats-section admin-stats">
-          <h2>📨 Teacher Recording Requests</h2>
+        <section id="teacher-recording-requests" className="stats-section admin-stats">
+          <h2>
+            📨 Teacher Recording Requests
+            {pendingRequestCount > 0 && (
+              <span className="admin-section-pending-count"> ({pendingRequestCount} pending)</span>
+            )}
+          </h2>
           {requests.length === 0 ? (
             <div className="empty-card">No requests.</div>
           ) : (

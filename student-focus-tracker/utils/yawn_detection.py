@@ -19,7 +19,7 @@ def calculate_distance(point1, point2):
     """Calculate Euclidean distance between two points."""
     return math.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2)
 
-def estimate_yawn(frame, threshold=0.5, min_detection_confidence=0.5, min_tracking_confidence=0.5):
+def estimate_yawn(frame, threshold=0.32, min_detection_confidence=0.5, min_tracking_confidence=0.5):
     """
     Detect yawning using MediaPipe Face Mesh.
 

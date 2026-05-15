@@ -99,6 +99,11 @@ const TeacherDashboard = () => {
       return;
     }
 
+    if (new Date(newClass.end_time) <= new Date(newClass.start_time)) {
+      setErrors('End time must be after start time.');
+      return;
+    }
+
     try {
       const token = localStorage.getItem('token');
       await api.post('/classes', newClass, { headers: { Authorization: token } });

@@ -85,6 +85,47 @@ def not_found(error):
 # IST timezone
 ist = pytz.timezone('Asia/Kolkata')
 
+
+def parse_dt_ist(value):
+    """Parse ISO datetime (or datetime object) as timezone-aware IST."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if text.endswith('Z'):
+            text = text[:-1] + '+00:00'
+        dt = datetime.fromisoformat(text)
+    if dt.tzinfo is None:
+        return ist.localize(dt)
+    return dt.astimezone(ist)
+
+
+def compute_class_status(start_time, end_time, now=None):
+    """Derive class status from schedule using IST."""
+    now = now or datetime.now(ist)
+    start = parse_dt_ist(start_time)
+    end = parse_dt_ist(end_time)
+    if now < start:
+        return 'upcoming'
+    if start <= now <= end:
+        return 'active'
+    return 'completed'
+
+
+def refresh_class_status(class_doc, persist=True):
+    """Recompute and optionally persist class status from start/end times."""
+    if class_doc.get('manually_completed'):
+        return class_doc.get('status', 'completed')
+
+    new_status = compute_class_status(class_doc.get('start_time'), class_doc.get('end_time'))
+    if persist and new_status != class_doc.get('status'):
+        db.classes.update_one({'_id': class_doc['_id']}, {'$set': {'status': new_status}})
+    class_doc['status'] = new_status
+    return new_status
+
+
 # ================= JWT =================
 def generate_token(user_id):
     payload = {
@@ -271,22 +312,13 @@ def create_class():
 
     data = request.get_json()
 
-    start = datetime.fromisoformat(data['start_time'])
-    end = datetime.fromisoformat(data['end_time'])
+    start = parse_dt_ist(data['start_time'])
+    end = parse_dt_ist(data['end_time'])
 
-    if start.tzinfo is None:
-        start = ist.localize(start)
-    if end.tzinfo is None:
-        end = ist.localize(end)
+    if end <= start:
+        return jsonify({'error': 'End time must be after start time'}), 400
 
-    now = datetime.now(ist)
-
-    if now < start:
-        status = 'upcoming'
-    elif start <= now <= end:
-        status = 'active'
-    else:
-        status = 'completed'
+    status = compute_class_status(start, end)
 
     db.classes.insert_one({
         'teacher_email': user['email'],
@@ -297,7 +329,8 @@ def create_class():
         'start_time': start.isoformat(),
         'end_time': end.isoformat(),
         'meeting_url': data['meeting_url'],
-        'status': status
+        'status': status,
+        'manually_completed': False
     })
 
     return jsonify({'message': 'Class created', 'status': status}), 201
@@ -309,8 +342,6 @@ def get_classes():
     if not user:
         return jsonify({'error': 'Unauthorized'}), 401
 
-    now = datetime.now(ist)
-
     query = {}
     if user['role'] == 'teacher':
         query['teacher_email'] = user['email']
@@ -320,21 +351,7 @@ def get_classes():
     classes = list(db.classes.find(query))
 
     for cls in classes:
-        start = datetime.fromisoformat(cls['start_time'])
-        end = datetime.fromisoformat(cls['end_time'])
-
-        if cls['status'] != 'completed':
-            if now < start:
-                new_status = 'upcoming'
-            elif start <= now <= end:
-                new_status = 'active'
-            else:
-                new_status = 'completed'
-
-            if new_status != cls['status']:
-                db.classes.update_one({'_id': cls['_id']}, {'$set': {'status': new_status}})
-                cls['status'] = new_status
-
+        refresh_class_status(cls)
         cls['_id'] = str(cls['_id'])
 
     return jsonify(classes), 200
@@ -346,31 +363,18 @@ def get_available_classes():
     if not user or user['role'] != 'student':
         return jsonify({'error': 'Unauthorized'}), 401
 
-    now = datetime.now(ist)
     classes = list(db.classes.find({
-        'student_emails': {'$ne': user['email']},
-        'status': {'$ne': 'completed'}
+        'student_emails': {'$ne': user['email']}
     }))
 
+    available = []
     for cls in classes:
-        start = datetime.fromisoformat(cls['start_time'])
-        end = datetime.fromisoformat(cls['end_time'])
+        refresh_class_status(cls)
+        if cls.get('status') != 'completed':
+            cls['_id'] = str(cls['_id'])
+            available.append(cls)
 
-        if cls['status'] != 'completed':
-            if now < start:
-                new_status = 'upcoming'
-            elif start <= now <= end:
-                new_status = 'active'
-            else:
-                new_status = 'completed'
-
-            if new_status != cls['status']:
-                db.classes.update_one({'_id': cls['_id']}, {'$set': {'status': new_status}})
-                cls['status'] = new_status
-
-        cls['_id'] = str(cls['_id'])
-
-    return jsonify(classes), 200
+    return jsonify(available), 200
 
 # ================= JOIN CLASS =================
 @app.route('/classes/<class_id>/join', methods=['POST'])
@@ -405,22 +409,7 @@ def get_class_status(class_id):
     if not cls:
         return jsonify({'error': 'Class not found'}), 404
 
-    # Update status based on current time
-    now = datetime.now(ist)
-    start = datetime.fromisoformat(cls['start_time'])
-    end = datetime.fromisoformat(cls['end_time'])
-
-    if cls['status'] != 'completed':
-        if now < start:
-            new_status = 'upcoming'
-        elif start <= now <= end:
-            new_status = 'active'
-        else:
-            new_status = 'completed'
-
-        if new_status != cls['status']:
-            db.classes.update_one({'_id': ObjectId(class_id)}, {'$set': {'status': new_status}})
-            cls['status'] = new_status
+    refresh_class_status(cls)
 
     return jsonify({'status': cls['status'], '_id': str(cls['_id']), 'class_name': cls['class_name']}), 200
 
@@ -1153,6 +1142,7 @@ def complete_class(class_id):
             {
                 '$set': {
                     'status': 'completed',
+                    'manually_completed': True,
                     'completed_at': datetime.now(ist).isoformat(),
                     'completed_by': user['email']
                 }
@@ -1174,27 +1164,12 @@ def get_teacher_classes():
         return jsonify({'error': 'Unauthorized'}), 403
 
     try:
-        now = datetime.now(ist)
         classes = list(db.classes.find({'teacher_email': user['email']}))
         
         class_stats = []
         for cls in classes:
-            # Update status based on current time
-            start = datetime.fromisoformat(cls['start_time'])
-            end = datetime.fromisoformat(cls['end_time'])
-            
-            if cls['status'] != 'completed':
-                if now < start:
-                    new_status = 'upcoming'
-                elif start <= now <= end:
-                    new_status = 'active'
-                else:
-                    new_status = 'completed'
-                
-                if new_status != cls['status']:
-                    db.classes.update_one({'_id': cls['_id']}, {'$set': {'status': new_status}})
-                    cls['status'] = new_status
-            
+            refresh_class_status(cls)
+
             # Get student focus statistics
             student_stats = []
             for student_email in cls.get('student_emails', []):
@@ -1374,9 +1349,9 @@ def get_admin_dashboard():
             ]))
             avg_focus = round(result[0]['avg'], 1) if result else 0
         
-        # Behavioral events statistics
-        yawning_events = db.frames.count_documents({'yawning': True})
-        laughing_events = db.frames.count_documents({'laughing': True})
+        # Behavioral events statistics (count any truthy detection flag)
+        yawning_events = db.frames.count_documents({'yawning': {'$in': [True, 'true', 1]}})
+        laughing_events = db.frames.count_documents({'laughing': {'$in': [True, 'true', 1]}})
         eyes_closed_events = db.frames.count_documents({'gaze': 'Eyes Closed'})
         
         # Get top teachers by class count

@@ -19,7 +19,7 @@ def calculate_distance(point1, point2):
     """Calculate Euclidean distance between two points."""
     return math.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2)
 
-def estimate_laugh(frame, width_threshold=0.8, height_threshold=0.3, min_detection_confidence=0.5, min_tracking_confidence=0.5):
+def estimate_laugh(frame, width_threshold=0.55, height_threshold=0.14, min_detection_confidence=0.5, min_tracking_confidence=0.5):
     """
     Detect laughing using MediaPipe Face Mesh by analyzing mouth shape changes.
 
